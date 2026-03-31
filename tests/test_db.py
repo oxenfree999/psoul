@@ -1,0 +1,219 @@
+"""Tests for SQLite storage layer."""
+
+import sqlite3
+from collections.abc import Iterator
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from psoul.db import DB_NAME, SCHEMA_VERSION, open_db, resolve_state_dir
+
+_INSERT_SESSION = (
+    "INSERT INTO sessions (session_id, name, state, launch_mode, launch_time, target_type, psoul_version) "
+    "VALUES (?, ?, 'running', 'attached', '2026-01-01T00:00:00', 'repl', '0.0.1')"
+)
+
+
+@pytest.fixture
+def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
+    conn = open_db(tmp_path)
+    yield conn
+    conn.close()
+
+
+def test_resolve_state_dir_uses_override(tmp_path: Path) -> None:
+    custom = tmp_path / "custom" / "nested"
+    result = resolve_state_dir(custom)
+    assert result == custom
+    assert custom.is_dir()
+
+
+def test_resolve_state_dir_uses_default(tmp_path: Path) -> None:
+    default = tmp_path / "default-state"
+    with patch("psoul.db.default_state_dir", return_value=default):
+        result = resolve_state_dir()
+    assert result == default
+    assert default.is_dir()
+
+
+def test_open_db_creates_file(tmp_path: Path) -> None:
+    conn = open_db(tmp_path)
+    conn.close()
+    assert (tmp_path / DB_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("pragma", "expected"),
+    [
+        ("journal_mode", "wal"),
+        ("foreign_keys", 1),
+        ("busy_timeout", 5000),
+        ("synchronous", 1),  # 1 = NORMAL
+    ],
+)
+def test_open_db_pragmas(tmp_path: Path, pragma: str, expected: object) -> None:
+    conn = open_db(tmp_path)
+    value = conn.execute(f"PRAGMA {pragma}").fetchone()[0]
+    conn.close()
+    assert value == expected
+
+
+def test_schema_and_tables(db: sqlite3.Connection) -> None:
+    version = db.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
+    assert version == str(SCHEMA_VERSION)
+    rows = db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    tables = {row[0] for row in rows}
+    expected = {
+        "schema_meta",
+        "sessions",
+        "results",
+        "events",
+        "commands",
+        "history",
+        "history_fts",
+        "artifacts",
+        "resource_samples",
+        "profiling_state",
+    }
+    assert expected <= tables
+
+
+def test_open_db_idempotent(tmp_path: Path) -> None:
+    conn1 = open_db(tmp_path)
+    conn2 = open_db(tmp_path)  # second connection while first is still open
+    conn1.close()
+    conn2.close()
+
+
+def test_results_fk_rejects_bad_session(db: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO results (session_id, generation, outcome, end_time) "
+            "VALUES ('nonexistent', 0, 'exited', '2026-01-01T00:00:00')"
+        )
+
+
+def test_cascade_delete_removes_results(db: sqlite3.Connection) -> None:
+    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    db.execute(
+        "INSERT INTO results (session_id, generation, outcome, end_time) "
+        "VALUES ('s1', 0, 'exited', '2026-01-01T01:00:00')"
+    )
+    db.execute("DELETE FROM sessions WHERE session_id = 's1'")
+    assert db.execute("SELECT COUNT(*) FROM results WHERE session_id = 's1'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("first_sql", "duplicate_sql"),
+    [
+        pytest.param(
+            "INSERT INTO events (session_id, sequence, timestamp, event_type) "
+            "VALUES ('s1', 1, '2026-01-01T00:00:00', 'session.started')",
+            "INSERT INTO events (session_id, sequence, timestamp, event_type) "
+            "VALUES ('s1', 1, '2026-01-01T00:00:01', 'runtime.stdout')",
+            id="events-duplicate-sequence",
+        ),
+        pytest.param(
+            "INSERT INTO commands (session_id, message_id, timestamp, command, status) "
+            "VALUES ('s1', 'msg-1', '2026-01-01T00:00:00', 'eval', 'ok')",
+            "INSERT INTO commands (session_id, message_id, timestamp, command, status) "
+            "VALUES ('s1', 'msg-1', '2026-01-01T00:00:01', 'eval', 'ok')",
+            id="commands-duplicate-message-id",
+        ),
+        pytest.param(
+            "INSERT INTO artifacts (session_id, name, path, registered_at, source) "
+            "VALUES ('s1', 'plot.png', 'artifacts/s1/plot.png', '2026-01-01T00:00:00', 'user')",
+            "INSERT INTO artifacts (session_id, name, path, registered_at, source) "
+            "VALUES ('s1', 'plot.png', 'artifacts/s1/plot2.png', '2026-01-01T00:00:01', 'user')",
+            id="artifacts-duplicate-name",
+        ),
+        pytest.param(
+            "INSERT INTO profiling_state (session_id, generation, backend, mode, started_at) "
+            "VALUES ('s1', 0, 'austin', 'cpu', '2026-01-01T00:00:00')",
+            "INSERT INTO profiling_state (session_id, generation, backend, mode, started_at) "
+            "VALUES ('s1', 0, 'py-spy', 'cpu', '2026-01-01T00:00:01')",
+            id="profiling-duplicate-active-mode",
+        ),
+    ],
+)
+def test_unique_constraint_rejects_duplicate(db: sqlite3.Connection, first_sql: str, duplicate_sql: str) -> None:
+    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    db.execute(first_sql)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(duplicate_sql)
+
+
+def test_commands_null_message_ids_allowed(db: sqlite3.Connection) -> None:
+    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    for i in range(2):
+        db.execute(
+            "INSERT INTO commands (session_id, timestamp, command, status) VALUES (?, ?, 'eval', 'ok')",
+            ("s1", f"2026-01-01T00:00:0{i}"),
+        )
+
+
+def test_history_set_null_on_session_delete(db: sqlite3.Connection) -> None:
+    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    db.execute("INSERT INTO history (session_id, timestamp, input) VALUES ('s1', '2026-01-01T00:00:00', 'print(42)')")
+    db.execute("DELETE FROM sessions WHERE session_id = 's1'")
+    row = db.execute("SELECT session_id, input FROM history").fetchone()
+    assert row[0] is None
+    assert row[1] == "print(42)"
+
+
+def test_history_fts(db: sqlite3.Connection) -> None:
+    db.execute("INSERT INTO history (timestamp, input) VALUES ('2026-01-01T00:00:00', 'import pandas as pd')")
+    db.execute("INSERT INTO history (timestamp, input) VALUES ('2026-01-01T00:00:01', 'print(hello)')")
+    # Search finds matching row
+    rows = db.execute("SELECT input FROM history_fts WHERE input MATCH 'pandas'").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "import pandas as pd"
+    # Delete trigger removes from index
+    db.execute("DELETE FROM history WHERE input = 'import pandas as pd'")
+    assert db.execute("SELECT COUNT(*) FROM history_fts WHERE input MATCH 'pandas'").fetchone()[0] == 0
+
+
+def test_future_version_rejected(tmp_path: Path) -> None:
+    conn = open_db(tmp_path)
+    conn.execute("UPDATE schema_meta SET value = '99' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(RuntimeError, match="newer than this psoul"):
+        open_db(tmp_path)
+
+
+def test_migration_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = open_db(tmp_path)
+    conn.execute("UPDATE schema_meta SET value = '0' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+    applied = []
+    monkeypatch.setattr("psoul.db._MIGRATIONS", {0: lambda c: applied.append(0)})
+    conn = open_db(tmp_path)
+    version = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
+    conn.close()
+    assert applied == [0]
+    assert version == str(SCHEMA_VERSION)
+
+
+def test_migration_rollback_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = open_db(tmp_path)
+    conn.execute("UPDATE schema_meta SET value = '0' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+    def bad_migration(c: sqlite3.Connection) -> None:
+        msg = "intentional failure"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("psoul.db._MIGRATIONS", {0: bad_migration})
+    with pytest.raises(RuntimeError, match="intentional failure"):
+        open_db(tmp_path)
+
+    # Check with raw connection — open_db would retry the broken migration
+    conn = sqlite3.connect(tmp_path / DB_NAME)
+    version = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
+    conn.close()
+    assert version == "0"
