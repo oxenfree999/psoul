@@ -1,13 +1,15 @@
 """Configuration schema, platform directory resolution, and config generation."""
 
 import dataclasses
+import sys
 import tomllib
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import get_args, get_origin, get_type_hints
 
-from platformdirs import user_config_path, user_state_path
+from platformdirs import PlatformDirs
+from platformdirs.unix import Unix
 
 from psoul.duration import parse_duration
 
@@ -77,14 +79,17 @@ def _normalize_section(section_name: str, section_cls: type, raw: dict) -> dict:
     }
 
 
+_DIRS = Unix(APP_NAME) if sys.platform == "darwin" else PlatformDirs(APP_NAME)
+
+
 def default_config_dir() -> Path:
-    """Return the platform-specific user config directory for psoul."""
-    return user_config_path(APP_NAME)
+    """Return the user config directory for psoul (~/.config/psoul on Unix)."""
+    return _DIRS.user_config_path
 
 
 def default_state_dir() -> Path:
-    """Return the platform-specific user state directory for psoul."""
-    return user_state_path(APP_NAME)
+    """Return the user state directory for psoul (~/.local/state/psoul on Unix)."""
+    return _DIRS.user_state_path
 
 
 @dataclass(frozen=True, slots=True)
