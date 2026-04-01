@@ -59,9 +59,7 @@ def test_process_config_defaults() -> None:
 
 def test_session_config_defaults() -> None:
     config = SessionConfig()
-    assert config.name_prefix == "psoul"
     assert config.tags is None
-    assert config.id_format == "short"
 
 
 def test_output_config_defaults() -> None:
@@ -84,7 +82,7 @@ def test_psoul_config_defaults() -> None:
     assert config.python.python_path is None
     assert config.launch.mode == "attached"
     assert config.process.stop_timeout == "10s"
-    assert config.session.name_prefix == "psoul"
+    assert config.session.tags is None
     assert config.output.format == "text"
     assert config.retention.max_age == "7d"
 

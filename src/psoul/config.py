@@ -146,12 +146,9 @@ class ProcessConfig:
 class SessionConfig:
     """[session] section.
 
-    name_prefix (str): default prefix for auto-generated session names. Default: 'psoul'.
     tags (dict | None): default key-value tags applied to all sessions. Default: None.
-    id_format (str): 'short' (human-readable) or 'uuid'. Default: 'short'.
     """
 
-    name_prefix: str = field(default="psoul", metadata={"description": "default name prefix for unnamed sessions"})
     tags: dict[str, str] | None = field(
         default=None,
         metadata={
@@ -159,7 +156,6 @@ class SessionConfig:
             "example": {"env": "dev", "team": "platform"},
         },
     )
-    id_format: str = field(default="short", metadata={"description": "short (human-readable) or uuid"})
 
 
 @dataclass(frozen=True, slots=True)

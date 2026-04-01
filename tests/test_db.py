@@ -10,8 +10,8 @@ import pytest
 from psoul.db import DB_NAME, SCHEMA_VERSION, open_db, resolve_state_dir
 
 _INSERT_SESSION = (
-    "INSERT INTO sessions (session_id, name, state, launch_mode, launch_time, target_type, psoul_version) "
-    "VALUES (?, ?, 'running', 'attached', '2026-01-01T00:00:00', 'repl', '0.0.1')"
+    "INSERT INTO sessions (session_id, state, launch_mode, launch_time, target_type, psoul_version) "
+    "VALUES (?, 'running', 'attached', '2026-01-01T00:00:00', 'repl', '0.0.1')"
 )
 
 
@@ -95,7 +95,7 @@ def test_results_fk_rejects_bad_session(db: sqlite3.Connection) -> None:
 
 
 def test_cascade_delete_removes_results(db: sqlite3.Connection) -> None:
-    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    db.execute(_INSERT_SESSION, ["s1"])
     db.execute(
         "INSERT INTO results (session_id, generation, outcome, end_time) "
         "VALUES ('s1', 0, 'exited', '2026-01-01T01:00:00')"
@@ -138,14 +138,14 @@ def test_cascade_delete_removes_results(db: sqlite3.Connection) -> None:
     ],
 )
 def test_unique_constraint_rejects_duplicate(db: sqlite3.Connection, first_sql: str, duplicate_sql: str) -> None:
-    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    db.execute(_INSERT_SESSION, ["s1"])
     db.execute(first_sql)
     with pytest.raises(sqlite3.IntegrityError):
         db.execute(duplicate_sql)
 
 
 def test_commands_null_message_ids_allowed(db: sqlite3.Connection) -> None:
-    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    db.execute(_INSERT_SESSION, ["s1"])
     for i in range(2):
         db.execute(
             "INSERT INTO commands (session_id, timestamp, command, status) VALUES (?, ?, 'eval', 'ok')",
@@ -154,7 +154,7 @@ def test_commands_null_message_ids_allowed(db: sqlite3.Connection) -> None:
 
 
 def test_history_set_null_on_session_delete(db: sqlite3.Connection) -> None:
-    db.execute(_INSERT_SESSION, ("s1", "test-session"))
+    db.execute(_INSERT_SESSION, ["s1"])
     db.execute("INSERT INTO history (session_id, timestamp, input) VALUES ('s1', '2026-01-01T00:00:00', 'print(42)')")
     db.execute("DELETE FROM sessions WHERE session_id = 's1'")
     row = db.execute("SELECT session_id, input FROM history").fetchone()

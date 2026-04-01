@@ -40,13 +40,12 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS sessions (
             session_id          TEXT PRIMARY KEY,
-            name                TEXT NOT NULL UNIQUE,
             tags                TEXT,
             state               TEXT NOT NULL,
             launch_mode         TEXT NOT NULL,
             launch_time         TEXT NOT NULL,
             target_type         TEXT NOT NULL,
-            target_path         TEXT,
+            target              TEXT,
             target_args         TEXT,
             target_cwd          TEXT,
             python_version      TEXT,
@@ -76,7 +75,6 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
         CREATE INDEX IF NOT EXISTS idx_sessions_launch_time ON sessions(launch_time);
-        CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name);
 
         CREATE TABLE IF NOT EXISTS results (
             session_id          TEXT NOT NULL,
