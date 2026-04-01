@@ -19,6 +19,7 @@ from psoul.config import (
     default_config_dir,
     default_state_dir,
     find_config_file,
+    generate_config,
     load_config,
 )
 
@@ -278,6 +279,13 @@ def test_config_init_creates_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     content = (tmp_path / "psoul.toml").read_text()
     assert "[launch]" in content
     assert "# mode" in content
+
+
+def test_generate_config_emits_type_correct_examples() -> None:
+    config = generate_config()
+    assert '# state_dir = "~/.local/state/psoul"' in config
+    assert '# python_path = "/usr/bin/python3"' in config
+    assert '# tags = { env = "dev", team = "platform" }' in config
 
 
 def test_config_init_refuses_overwrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
