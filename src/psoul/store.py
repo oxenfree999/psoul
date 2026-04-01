@@ -15,32 +15,20 @@ from psoul.session import (
 )
 
 
-def _to_json(value: object) -> str | None:
-    """Serialize a list or dict to a JSON string, or return None."""
-    if value is None:
-        return None
-    return json.dumps(value)
-
-
-def _opt_str(value: Path | None) -> str | None:
-    """Convert an optional Path to a string, or return None."""
-    return str(value) if value is not None else None
-
-
 def _serialize(session: Session) -> dict[str, object]:
     """Convert a Session to a dict of SQLite-compatible values."""
-    return {
+    raw = {
         "session_id": session.session_id,
-        "tags": _to_json(session.tags),
-        "state": session.state.value,
-        "launch_mode": session.launch_mode.value,
-        "launch_time": session.launch_time.isoformat(),
-        "target_type": session.target_type.value,
+        "tags": session.tags,
+        "state": session.state,
+        "launch_mode": session.launch_mode,
+        "launch_time": session.launch_time,
+        "target_type": session.target_type,
         "target": session.target,
-        "target_args": _to_json(session.target_args),
-        "target_cwd": _opt_str(session.target_cwd),
+        "target_args": session.target_args,
+        "target_cwd": session.target_cwd,
         "python_version": session.python_version,
-        "python_path": _opt_str(session.python_path),
+        "python_path": session.python_path,
         "uv_version": session.uv_version,
         "resolved_by": session.resolved_by,
         "psoul_version": session.psoul_version,
@@ -48,25 +36,30 @@ def _serialize(session: Session) -> dict[str, object]:
         "host": session.host,
         "os": session.os,
         "arch": session.arch,
-        "config_sources": _to_json(session.config_sources),
+        "config_sources": session.config_sources,
         "git_sha": session.git_sha,
-        "git_dirty": int(session.git_dirty) if session.git_dirty is not None else None,
+        "git_dirty": session.git_dirty,
         "lockfile_hash": session.lockfile_hash,
         "script_hash": session.script_hash,
         "supervisor_pid": session.supervisor_pid,
-        "socket_path": _opt_str(session.socket_path),
+        "socket_path": session.socket_path,
         "helper_pid": session.helper_pid,
-        "helper_capabilities": _to_json(session.helper_capabilities),
+        "helper_capabilities": session.helper_capabilities,
         "generation": session.generation,
         "control_epoch": session.control_epoch,
         "controller_pid": session.controller_pid,
-        "control_acquired_at": session.control_acquired_at.isoformat() if session.control_acquired_at else None,
+        "control_acquired_at": session.control_acquired_at,
         "sandbox_backend": session.sandbox_backend,
-        "sandbox_policy": _to_json(session.sandbox_policy),
+        "sandbox_policy": session.sandbox_policy,
     }
+    return {key: _serialize_value(key, value) for key, value in raw.items()}
 
 
 _FIELD_TYPES: dict[str, type] = {
+    "state": SessionState,
+    "launch_mode": LaunchMode,
+    "target_type": TargetType,
+    "target": str,
     "tags": dict,
     "helper_capabilities": dict,
     "sandbox_policy": dict,
@@ -77,6 +70,18 @@ _FIELD_TYPES: dict[str, type] = {
     "socket_path": Path,
     "launch_time": datetime,
     "control_acquired_at": datetime,
+    "python_version": str,
+    "uv_version": str,
+    "resolved_by": str,
+    "psoul_version": str,
+    "protocol_version": int,
+    "host": str,
+    "os": str,
+    "arch": str,
+    "git_sha": str,
+    "git_dirty": bool,
+    "lockfile_hash": str,
+    "script_hash": str,
     "supervisor_pid": int,
     "helper_pid": int,
     "generation": int,
@@ -88,30 +93,72 @@ _FIELD_TYPES: dict[str, type] = {
 _JSON_FIELDS = frozenset({"tags", "helper_capabilities", "sandbox_policy", "target_args", "config_sources"})
 
 
-def _serialize_value(key: str, value: object) -> object:
-    """Serialize a single field value for SQLite storage.
+def _validate_json_shape(key: str, value: object) -> None:
+    """Validate JSON-backed field contents against the Session model."""
+    if key in {"target_args", "config_sources"}:
+        if not isinstance(value, list):
+            msg = f"{key} must be list, got {type(value).__name__}"
+            raise TypeError(msg)
+        if not all(isinstance(item, str) for item in value):
+            msg = f"{key} must be list[str]"
+            raise TypeError(msg)
+        return
+    if key == "tags":
+        if not isinstance(value, dict):
+            msg = f"{key} must be dict, got {type(value).__name__}"
+            raise TypeError(msg)
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            msg = "tags must be dict[str, str]"
+            raise TypeError(msg)
+        return
+    if key in {"helper_capabilities", "sandbox_policy"}:
+        if not isinstance(value, dict):
+            msg = f"{key} must be dict, got {type(value).__name__}"
+            raise TypeError(msg)
+        if all(isinstance(k, str) for k in value):
+            return
+        msg = f"{key} must be dict[str, object]"
+        raise TypeError(msg)
 
-    Raises TypeError if the value doesn't match the expected domain type.
-    """
-    if value is None:
-        return None
+
+def _validate_field_type(key: str, value: object) -> None:
+    """Validate a field against its declared runtime type."""
+    expected = _FIELD_TYPES.get(key)
+    if expected is None:
+        return
+    if expected is int and type(value) is not int:
+        msg = f"{key} must be int, got {type(value).__name__}"
+        raise TypeError(msg)
+    if expected is bool and type(value) is not bool:
+        msg = f"{key} must be bool, got {type(value).__name__}"
+        raise TypeError(msg)
+    if expected not in {int, bool} and not isinstance(value, expected):
+        msg = f"{key} must be {expected.__name__}, got {type(value).__name__}"
+        raise TypeError(msg)
+
+
+def _encode_value(key: str, value: object) -> object:
+    """Encode a validated Python value for SQLite storage."""
     if isinstance(value, StrEnum):
         return value.value
-    expected = _FIELD_TYPES.get(key)
-    if expected is not None:
-        if expected is int and type(value) is not int:
-            msg = f"{key} must be int, got {type(value).__name__}"
-            raise TypeError(msg)
-        if expected is not int and not isinstance(value, expected):
-            msg = f"{key} must be {expected.__name__}, got {type(value).__name__}"
-            raise TypeError(msg)
     if key in _JSON_FIELDS:
+        _validate_json_shape(key, value)
         return json.dumps(value)
+    if isinstance(value, bool):
+        return int(value)
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def _serialize_value(key: str, value: object) -> object:
+    """Serialize a single field value for SQLite storage."""
+    if value is None:
+        return None
+    _validate_field_type(key, value)
+    return _encode_value(key, value)
 
 
 def _from_json(value: str | None) -> object:

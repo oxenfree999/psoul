@@ -2,8 +2,10 @@
 
 import sqlite3
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -94,6 +96,18 @@ def test_create_duplicate_raises(store: SessionStore) -> None:
         store.create(_session())
 
 
+def test_create_rejects_bad_target_args_shape(store: SessionStore) -> None:
+    session = replace(_session(), target_args=cast("list[str]", {"bad": "shape"}))
+    with pytest.raises(TypeError, match=r"target_args must be list\b"):
+        store.create(session)
+
+
+def test_create_rejects_non_string_config_source(store: SessionStore) -> None:
+    session = replace(_session(), config_sources=cast("list[str]", [1]))
+    with pytest.raises(TypeError, match=r"config_sources must be list\[str\]"):
+        store.create(session)
+
+
 def test_list_returns_newest_first(store: SessionStore) -> None:
     store.create(_session(session_id="first-session-aaa-bbb", launch_time=datetime(2026, 1, 1, 0, 0, tzinfo=UTC)))
     store.create(_session(session_id="second-session-ccc-ddd", launch_time=datetime(2026, 1, 1, 0, 1, tzinfo=UTC)))
@@ -145,6 +159,12 @@ def test_update_rejects_immutable_field(store: SessionStore) -> None:
 def test_update_missing_session_raises(store: SessionStore) -> None:
     with pytest.raises(KeyError, match="session not found"):
         store.update("no-such-session", supervisor_pid=1)
+
+
+def test_update_rejects_non_string_tag_values(store: SessionStore) -> None:
+    store.create(_session())
+    with pytest.raises(TypeError, match=r"tags must be dict\[str, str\]"):
+        store.update("calm-tiger-builds-kites", tags=cast("dict[str, str]", {"env": 1}))
 
 
 @pytest.mark.parametrize(
