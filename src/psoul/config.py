@@ -99,7 +99,10 @@ class PathsConfig:
     state_dir (Path | None): overrides the default platform state directory. Default: None.
     """
 
-    state_dir: Path | None = field(default=None, metadata={"description": "override session/state directory"})
+    state_dir: Path | None = field(
+        default=None,
+        metadata={"description": "override session/state directory", "example": "~/.local/state/psoul"},
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +113,8 @@ class PythonConfig:
     """
 
     python_path: Path | None = field(
-        default=None, metadata={"description": "override Python binary, bypasses uv discovery"}
+        default=None,
+        metadata={"description": "override Python binary, bypasses uv discovery", "example": "/usr/bin/python3"},
     )
 
 
@@ -149,7 +153,11 @@ class SessionConfig:
 
     name_prefix: str = field(default="psoul", metadata={"description": "default name prefix for unnamed sessions"})
     tags: dict[str, str] | None = field(
-        default=None, metadata={"description": "default key-value tags applied to all sessions"}
+        default=None,
+        metadata={
+            "description": "default key-value tags applied to all sessions",
+            "example": {"env": "dev", "team": "platform"},
+        },
     )
     id_format: str = field(default="short", metadata={"description": "short (human-readable) or uuid"})
 
@@ -285,14 +293,15 @@ def load_config(path: Path | None = None) -> PsoulConfig:
 
 def _format_toml_value(value: object) -> str:
     """Format a Python value as a TOML literal."""
-    if value is None:
-        return '""'
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, str):
         return f'"{value}"'
+    if isinstance(value, dict):
+        pairs = [f'{k} = "{v}"' for k, v in value.items()]
+        return "{ " + ", ".join(pairs) + " }"
     return str(value)
 
 
@@ -310,7 +319,7 @@ def generate_config() -> str:
         lines.append(f"[{section_field.name}]")
         for f in dataclasses.fields(section):
             desc = f.metadata.get("description", "")
-            value = getattr(section, f.name)
+            value = f.metadata["example"] if getattr(section, f.name) is None else getattr(section, f.name)
             comment = f"  # {desc}" if desc else ""
             lines.append(f"# {f.name} = {_format_toml_value(value)}{comment}")
         lines.append("")
