@@ -198,3 +198,38 @@ def test_ps_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert json_result.exit_code == 0
     records = json.loads(json_result.output)
     assert {record["session_id"] for record in records} == {"ps-test-a", "ps-test-b"}
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_status_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "noop.py"
+    script.write_text("pass")
+    runner.invoke(cli, ["run", "--headless", "--name", "status-test", str(script)])
+    text_result = runner.invoke(cli, ["status", "status-t"])
+    assert text_result.exit_code == 0
+    assert "status-test" in text_result.output
+    json_result = runner.invoke(cli, ["status", "status-test", "--json"])
+    assert json_result.exit_code == 0
+    assert json.loads(json_result.output)["session_id"] == "status-test"
+
+
+def test_status_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    result = runner.invoke(cli, ["status", "nonexistent"])
+    assert result.exit_code == 1
+    assert "session not found: nonexistent" in result.output
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_status_ambiguous_prefix_lists_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "noop.py"
+    script.write_text("pass")
+    runner.invoke(cli, ["run", "--headless", "--name", "status-aa", str(script)])
+    runner.invoke(cli, ["run", "--headless", "--name", "status-ab", str(script)])
+    result = runner.invoke(cli, ["status", "status-a"])
+    assert result.exit_code == 1
+    assert "ambiguous session selector: status-a" in result.output
+    assert "status-aa" in result.output
+    assert "status-ab" in result.output
