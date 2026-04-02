@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import sqlite3
 import sys
 import tomllib
 from pathlib import Path
@@ -13,6 +14,10 @@ from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.logging import configure_logging, resolve_log_level
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
 from psoul.config import PsoulConfig, find_config_file, generate_config, load_config
+from psoul.db import open_db, resolve_state_dir
+from psoul.launch import build_launch_request, launch_attached, launch_headless
+from psoul.session import LaunchMode
+from psoul.store import SessionStore
 from psoul.version import VERSION
 
 cli = typer.Typer(
@@ -117,6 +122,55 @@ def init(ctx: typer.Context) -> None:
     state: GlobalState = ctx.obj
     if not state.quiet:
         print(f"Wrote {dest}")
+
+
+@cli.command(
+    context_settings={"allow_extra_args": True, "allow_interspersed_args": False, "ignore_unknown_options": True},
+)
+def run(
+    ctx: typer.Context,
+    module: Annotated[str | None, typer.Option("-m", help="Module to run.")] = None,
+    name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
+    headless: Annotated[bool, typer.Option("--headless", help="Launch in background.")] = False,
+) -> None:
+    """Launch a Python target as a managed session."""
+    state: GlobalState = ctx.obj
+    cfg = _load_resolved_config(state.config_override)
+    target = ctx.args[0] if not module and ctx.args else None
+    extra_args = ctx.args[1:] if target else ctx.args
+    try:
+        request = build_launch_request(
+            target=target,
+            module=module,
+            extra_args=extra_args,
+            name=name,
+            headless=headless,
+            tags=None,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE) from exc
+    state_dir = resolve_state_dir(cfg.paths.state_dir)
+    conn = open_db(state_dir)
+    try:
+        store = SessionStore(conn)
+        if request.launch_mode == LaunchMode.headless:
+            session, supervisor_pid = launch_headless(request, store, state_dir)
+            print(
+                json.dumps(
+                    {"session_id": session.session_id, "state": session.state.value, "supervisor_pid": supervisor_pid}
+                )
+            )
+        else:
+            launch_attached(request, store)
+    except sqlite3.IntegrityError:
+        print(f"Error: session ID already exists: {request.session_id}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    except NotImplementedError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    finally:
+        conn.close()
 
 
 @cli.command()

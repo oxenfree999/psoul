@@ -48,6 +48,7 @@ def test_main_help() -> None:
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ───────────────────────────────────────────────────────────────────╮
 │ doctor   Check psoul environment and report status.                          │
+│ run      Launch a Python target as a managed session.                        │
 │ version  Show psoul version.                                                 │
 │ config   Show and manage configuration.                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
