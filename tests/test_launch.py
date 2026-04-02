@@ -182,3 +182,19 @@ def test_headless_without_fork_prints_cli_error(tmp_path: Path, monkeypatch: pyt
     result = runner.invoke(cli, ["run", "--headless", str(script)])
     assert result.exit_code == 1
     assert "headless mode requires Unix" in result.output
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_ps_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "noop.py"
+    script.write_text("pass")
+    runner.invoke(cli, ["run", "--headless", "--name", "ps-test-a", str(script)])
+    runner.invoke(cli, ["run", "--headless", "--name", "ps-test-b", str(script)])
+    text_result = runner.invoke(cli, ["ps"])
+    assert text_result.exit_code == 0
+    assert "ps-test-a" in text_result.output
+    json_result = runner.invoke(cli, ["ps", "--json"])
+    assert json_result.exit_code == 0
+    records = json.loads(json_result.output)
+    assert {record["session_id"] for record in records} == {"ps-test-a", "ps-test-b"}

@@ -16,7 +16,7 @@ from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, reso
 from psoul.config import PsoulConfig, find_config_file, generate_config, load_config
 from psoul.db import open_db, resolve_state_dir
 from psoul.launch import build_launch_request, launch_attached, launch_headless
-from psoul.session import LaunchMode
+from psoul.session import LaunchMode, SessionState
 from psoul.store import SessionStore
 from psoul.version import VERSION
 
@@ -171,6 +171,27 @@ def run(
         raise typer.Exit(ExitCode.ERROR) from None
     finally:
         conn.close()
+
+
+@cli.command()
+def ps(
+    ctx: typer.Context,
+    state: Annotated[SessionState | None, typer.Option("--state", help="Filter by session state.")] = None,
+    json_flag: Annotated[bool, typer.Option("--json", help="Output JSON instead of text.")] = False,
+) -> None:
+    """List sessions."""
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    conn = open_db(resolve_state_dir(cfg.paths.state_dir))
+    try:
+        sessions = SessionStore(conn).list(state=state)
+    finally:
+        conn.close()
+    if json_flag:
+        print(json.dumps([dataclasses.asdict(s) for s in sessions], default=str))
+        return
+    for s in sessions:
+        print(f"{s.session_id}  {s.state}  {s.target or 'repl'}  {s.launch_time.isoformat()}")
 
 
 @cli.command()
