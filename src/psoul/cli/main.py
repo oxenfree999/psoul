@@ -169,6 +169,9 @@ def run(
     conn = open_db(state_dir)
     try:
         store = SessionStore(conn)
+        if store.get(request.session_id) is not None:
+            print(f"Error: session ID already exists: {request.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR)
         if request.launch_mode == LaunchMode.headless:
             session, supervisor_pid = launch_headless(request, store, state_dir)
             print(

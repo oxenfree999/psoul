@@ -190,7 +190,6 @@ def test_headless_cli_prints_record_and_exits(tmp_path: Path, monkeypatch: pytes
 
 def test_duplicate_session_id_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: True)
     _store_session(tmp_path, "dup-test")
     script = tmp_path / "noop.py"
     script.write_text("pass")
