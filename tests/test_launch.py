@@ -233,3 +233,30 @@ def test_status_ambiguous_prefix_lists_matches(tmp_path: Path, monkeypatch: pyte
     assert "ambiguous session selector: status-a" in result.output
     assert "status-aa" in result.output
     assert "status-ab" in result.output
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_launch_to_query_exited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "hello.py"
+    script.write_text("print('hello')")
+    record = json.loads(runner.invoke(cli, ["run", "--headless", "--name", "e2e-ok", str(script)]).output)
+    os.waitpid(record["supervisor_pid"], 0)
+    ps_result = runner.invoke(cli, ["ps", "--state", "exited"])
+    assert ps_result.exit_code == 0
+    assert "e2e-ok" in ps_result.output
+    detail = json.loads(runner.invoke(cli, ["status", "e2e-ok", "--json"]).output)
+    assert detail["state"] == "exited"
+    assert detail["target"] == str(script)
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_launch_to_query_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "fail.py"
+    script.write_text("import sys; sys.exit(42)")
+    record = json.loads(runner.invoke(cli, ["run", "--headless", "--name", "e2e-fail", str(script)]).output)
+    os.waitpid(record["supervisor_pid"], 0)
+    assert "e2e-fail" in runner.invoke(cli, ["ps", "--state", "failed"]).output
+    detail = json.loads(runner.invoke(cli, ["status", "e2e-fail", "--json"]).output)
+    assert detail["state"] == "failed"
