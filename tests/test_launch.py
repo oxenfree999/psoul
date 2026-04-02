@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,10 +22,12 @@ from psoul.launch import (
     parse_launch_target,
     resolve_session_id,
 )
-from psoul.session import LaunchMode, SessionState, TargetType
+from psoul.session import LaunchMode, Session, SessionState, TargetType
 from psoul.store import SessionStore
+from psoul.version import VERSION
 
 runner = CliRunner()
+requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
 
 
 @pytest.fixture
@@ -122,6 +125,26 @@ def _script_request(
     )
 
 
+def _store_session(state_dir: Path, name: str, *, target: str = "test.py") -> None:
+    """Insert a session directly into the store (no fork needed)."""
+    conn = open_db(state_dir)
+    store = SessionStore(conn)
+    store.create(
+        Session(
+            session_id=name,
+            state=SessionState.starting,
+            launch_mode=LaunchMode.headless,
+            launch_time=datetime.now(UTC),
+            psoul_version=VERSION,
+            target_type=TargetType.script,
+            target=target,
+        )
+    )
+    store.update(name, state=SessionState.running)
+    conn.close()
+
+
+@requires_fork
 def test_headless_supervisor_reaps_success(store: SessionStore, tmp_path: Path) -> None:
     req = _script_request("pass")
     session, supervisor_pid = launch_headless(req, store, tmp_path)
@@ -132,6 +155,7 @@ def test_headless_supervisor_reaps_success(store: SessionStore, tmp_path: Path) 
     assert final.state == SessionState.exited
 
 
+@requires_fork
 def test_headless_supervisor_reaps_failure(store: SessionStore, tmp_path: Path) -> None:
     req = _script_request("import sys; sys.exit(1)", name="fail-session")
     session, supervisor_pid = launch_headless(req, store, tmp_path)
@@ -147,6 +171,7 @@ def test_attached_launch_records_current_process_as_supervisor(store: SessionSto
     assert final.supervisor_pid == os.getpid()
 
 
+@requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_headless_cli_prints_record_and_exits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
@@ -163,20 +188,21 @@ def test_headless_cli_prints_record_and_exits(tmp_path: Path, monkeypatch: pytes
     assert record["supervisor_pid"] > 0
 
 
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_duplicate_session_id_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: True)
+    _store_session(tmp_path, "dup-test")
     script = tmp_path / "noop.py"
     script.write_text("pass")
-    runner.invoke(cli, ["run", "--headless", "--name", "dup-test", str(script)])
-    result = runner.invoke(cli, ["run", "--headless", "--name", "dup-test", str(script)])
+    result = runner.invoke(cli, ["run", "--name", "dup-test", str(script)])
     assert result.exit_code == 1
     assert "session ID already exists: dup-test" in result.output
 
 
 def test_headless_without_fork_prints_cli_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    monkeypatch.delattr("psoul.launch.os.fork")
+    if hasattr(os, "fork"):
+        monkeypatch.delattr("psoul.launch.os.fork")
     script = tmp_path / "noop.py"
     script.write_text("pass")
     result = runner.invoke(cli, ["run", "--headless", str(script)])
@@ -184,13 +210,10 @@ def test_headless_without_fork_prints_cli_error(tmp_path: Path, monkeypatch: pyt
     assert "headless mode requires Unix" in result.output
 
 
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_ps_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    script = tmp_path / "noop.py"
-    script.write_text("pass")
-    runner.invoke(cli, ["run", "--headless", "--name", "ps-test-a", str(script)])
-    runner.invoke(cli, ["run", "--headless", "--name", "ps-test-b", str(script)])
+    _store_session(tmp_path, "ps-test-a")
+    _store_session(tmp_path, "ps-test-b")
     text_result = runner.invoke(cli, ["ps"])
     assert text_result.exit_code == 0
     assert "ps-test-a" in text_result.output
@@ -200,12 +223,9 @@ def test_ps_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert {record["session_id"] for record in records} == {"ps-test-a", "ps-test-b"}
 
 
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_status_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    script = tmp_path / "noop.py"
-    script.write_text("pass")
-    runner.invoke(cli, ["run", "--headless", "--name", "status-test", str(script)])
+    _store_session(tmp_path, "status-test")
     text_result = runner.invoke(cli, ["status", "status-t"])
     assert text_result.exit_code == 0
     assert "status-test" in text_result.output
@@ -221,13 +241,10 @@ def test_status_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert "session not found: nonexistent" in result.output
 
 
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_status_ambiguous_prefix_lists_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    script = tmp_path / "noop.py"
-    script.write_text("pass")
-    runner.invoke(cli, ["run", "--headless", "--name", "status-aa", str(script)])
-    runner.invoke(cli, ["run", "--headless", "--name", "status-ab", str(script)])
+    _store_session(tmp_path, "status-aa")
+    _store_session(tmp_path, "status-ab")
     result = runner.invoke(cli, ["status", "status-a"])
     assert result.exit_code == 1
     assert "ambiguous session selector: status-a" in result.output
@@ -235,6 +252,7 @@ def test_status_ambiguous_prefix_lists_matches(tmp_path: Path, monkeypatch: pyte
     assert "status-ab" in result.output
 
 
+@requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_launch_to_query_exited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
@@ -250,6 +268,7 @@ def test_launch_to_query_exited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert detail["target"] == str(script)
 
 
+@requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_launch_to_query_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
