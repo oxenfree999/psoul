@@ -1,0 +1,178 @@
+"""Tests for provenance capture: git info, file hashes, and platform metadata."""
+
+import hashlib
+import subprocess
+import sys
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from psoul.provenance import (
+    file_hash,
+    find_lockfile_hash,
+    gather,
+    git_dirty,
+    git_sha,
+    script_hash,
+)
+from psoul.session import TargetType
+
+FAKE_SHA = "a" * 40
+
+
+def _mock_subprocess(result: object) -> Callable[..., object]:
+    """Return a callable that either returns *result* or raises it."""
+
+    def mock(*_args: object, **_kwargs: object) -> object:
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    return mock
+
+
+@pytest.mark.parametrize(
+    ("func", "which_result", "run_result", "expected"),
+    [
+        (git_sha, "/usr/bin/git", subprocess.CompletedProcess([], 0, stdout=FAKE_SHA + "\n"), FAKE_SHA),
+        (git_sha, None, None, None),
+        (git_sha, "/usr/bin/git", subprocess.CalledProcessError(128, "git"), None),
+        (git_dirty, "/usr/bin/git", subprocess.CompletedProcess([], 0, stdout=""), False),
+        (git_dirty, "/usr/bin/git", subprocess.CompletedProcess([], 0, stdout=" M dirty.py\n?? new.py\n"), True),
+        (git_dirty, None, None, None),
+        (git_dirty, "/usr/bin/git", subprocess.CalledProcessError(128, "git"), None),
+    ],
+    ids=["sha-ok", "sha-no-git", "sha-no-repo", "dirty-clean", "dirty-dirty", "dirty-no-git", "dirty-no-repo"],
+)
+def test_git_functions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    func: Callable[..., object],
+    which_result: object,
+    run_result: object,
+    expected: object,
+) -> None:
+    monkeypatch.setattr("psoul.provenance.shutil.which", lambda _: which_result)
+    if run_result is not None:
+        monkeypatch.setattr("psoul.provenance.subprocess.run", _mock_subprocess(run_result))
+    assert func(tmp_path) == expected
+
+
+_HELLO_HASH = f"sha256:{hashlib.sha256(b'hello world', usedforsecurity=False).hexdigest()}"
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (b"hello world", _HELLO_HASH),
+        (None, None),
+    ],
+    ids=["real-file", "missing"],
+)
+def test_file_hash(tmp_path: Path, content: bytes | None, expected: str | None) -> None:
+    f = tmp_path / "test.txt"
+    if content is not None:
+        f.write_bytes(content)
+    assert file_hash(f) == expected
+
+
+@pytest.mark.parametrize(
+    ("files", "expected_name"),
+    [
+        ({"uv.lock": b"uv", "requirements.txt": b"req"}, "uv.lock"),
+        ({"poetry.lock": b"poetry", "pdm.lock": b"pdm"}, "poetry.lock"),
+        ({"pdm.lock": b"pdm", "Pipfile.lock": b"pipenv"}, "pdm.lock"),
+        ({"Pipfile.lock": b"pipenv", "requirements.txt": b"req"}, "Pipfile.lock"),
+        ({"requirements.txt": b"req"}, "requirements.txt"),
+        ({}, None),
+    ],
+    ids=[
+        "prefers-uv-lock",
+        "prefers-poetry-over-pdm",
+        "prefers-pdm-over-pipfile",
+        "prefers-pipfile-over-requirements",
+        "falls-back-to-requirements",
+        "no-lockfile",
+    ],
+)
+def test_find_lockfile_hash(tmp_path: Path, files: dict[str, bytes], expected_name: str | None) -> None:
+    for name, content in files.items():
+        (tmp_path / name).write_bytes(content)
+    result = find_lockfile_hash(tmp_path)
+    if expected_name is None:
+        assert result is None
+    else:
+        assert result == file_hash(tmp_path / expected_name)
+
+
+@pytest.mark.parametrize(
+    ("target_type", "target", "write_file", "expect_hash"),
+    [
+        (TargetType.script, "train.py", True, True),
+        (TargetType.module, "http.server", False, False),
+        (TargetType.repl, None, False, False),
+        (TargetType.script, "-c", False, False),
+        (TargetType.script, "-", False, False),
+        (TargetType.script, "missing.py", False, False),
+    ],
+    ids=["real-script", "module", "repl", "dash-c", "stdin", "missing-file"],
+)
+def test_script_hash(
+    tmp_path: Path, target_type: TargetType, target: str | None, write_file: bool, expect_hash: bool
+) -> None:
+    if write_file and target is not None:
+        (tmp_path / target).write_bytes(b"print('hi')")
+    result = script_hash(target_type, target, tmp_path)
+    if expect_hash:
+        assert result is not None
+        assert result.startswith("sha256:")
+    else:
+        assert result is None
+
+
+def test_script_hash_preserves_windows_absolute_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Path] = []
+
+    def mock_file_hash(path: Path) -> str:
+        seen.append(path)
+        return "sha256:sunny-bunnies"
+
+    monkeypatch.setattr("psoul.provenance.file_hash", mock_file_hash)
+
+    result = script_hash(TargetType.script, r"C:\work\train.py", tmp_path)
+
+    assert result == "sha256:sunny-bunnies"
+    assert seen == [Path(r"C:\work\train.py")]
+
+
+def test_gather(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.provenance.shutil.which", lambda _: "/usr/bin/git")
+
+    def mock_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess([], 0, stdout=FAKE_SHA + "\n")
+        return subprocess.CompletedProcess([], 0, stdout=" M dirty.py\n")
+
+    monkeypatch.setattr("psoul.provenance.subprocess.run", mock_run)
+    monkeypatch.setattr("psoul.provenance.platform.python_version", lambda: "3.14.0")
+    monkeypatch.setattr("psoul.provenance.platform.node", lambda: "testhost")
+    monkeypatch.setattr("psoul.provenance.platform.machine", lambda: "aarch64")
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+
+    script = tmp_path / "train.py"
+    script.write_bytes(b"print('hi')")
+    (tmp_path / "uv.lock").write_bytes(b"lockfile content")
+
+    result = gather(TargetType.script, "train.py", tmp_path)
+
+    assert result["git_sha"] == FAKE_SHA
+    assert result["git_dirty"] is True
+    assert result["script_hash"] == file_hash(script)
+    assert result["lockfile_hash"] == file_hash(tmp_path / "uv.lock")
+    assert result["python_version"] == "3.14.0"
+    assert result["python_path"] == Path("/usr/bin/python3")
+    assert result["host"] == "testhost"
+    assert result["os"] == "linux"
+    assert result["arch"] == "aarch64"

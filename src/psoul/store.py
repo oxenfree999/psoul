@@ -365,3 +365,24 @@ class SessionStore:
             msg = f"session vanished after update: {session_id}"
             raise RuntimeError(msg)
         return updated
+
+    def record_result(
+        self,
+        session_id: str,
+        *,
+        outcome: str,
+        exit_code: int | None,
+        end_time: datetime,
+        duration_seconds: float,
+    ) -> None:
+        """Insert a result row for the session's current generation."""
+        session = self.get(session_id)
+        if session is None:
+            msg = f"session not found: {session_id}"
+            raise KeyError(msg)
+        self.conn.execute(
+            "INSERT INTO results (session_id, generation, outcome, exit_code, end_time, duration_seconds)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, session.generation, outcome, exit_code, end_time.isoformat(), duration_seconds),
+        )
+        self.conn.commit()

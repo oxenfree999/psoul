@@ -182,3 +182,48 @@ def test_update_rejects_wrong_type(store: SessionStore, field: str, bad_value: o
     store.create(_session())
     with pytest.raises(TypeError, match=f"must be {expected_type}"):
         store.update("calm-tiger-builds-kites", **{field: bad_value})
+
+
+def test_record_result_inserts_row(store: SessionStore) -> None:
+    store.create(_session())
+    end = datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
+    store.record_result(
+        "calm-tiger-builds-kites",
+        outcome="exited",
+        exit_code=0,
+        end_time=end,
+        duration_seconds=300.0,
+    )
+    row = store.conn.execute("SELECT * FROM results WHERE session_id = ?", ["calm-tiger-builds-kites"]).fetchone()
+    assert row is not None
+    assert row["outcome"] == "exited"
+    assert row["exit_code"] == 0
+    assert row["end_time"] == end.isoformat()
+    assert row["duration_seconds"] == pytest.approx(300.0)
+    assert row["generation"] == 0
+
+
+def test_record_result_uses_current_generation(store: SessionStore) -> None:
+    """record_result() should write the session's current generation."""
+    store.create(replace(_session(session_id="future-session"), generation=3))
+    store.record_result(
+        "future-session",
+        outcome="failed",
+        exit_code=7,
+        end_time=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+        duration_seconds=12.5,
+    )
+    row = store.conn.execute("SELECT generation FROM results WHERE session_id = ?", ["future-session"]).fetchone()
+    assert row is not None
+    assert row["generation"] == 3
+
+
+def test_record_result_missing_session_raises(store: SessionStore) -> None:
+    with pytest.raises(KeyError, match="session not found"):
+        store.record_result(
+            "no-such-session",
+            outcome="failed",
+            exit_code=1,
+            end_time=datetime(2026, 1, 1, tzinfo=UTC),
+            duration_seconds=0.0,
+        )

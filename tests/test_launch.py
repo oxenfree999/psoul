@@ -21,7 +21,9 @@ from psoul.launch import (
     launch_headless,
     parse_launch_target,
     resolve_session_id,
+    wait_for_exit,
 )
+from psoul.provenance import SessionProvenance
 from psoul.session import LaunchMode, Session, SessionState, TargetType
 from psoul.store import SessionStore
 from psoul.version import VERSION
@@ -169,6 +171,103 @@ def test_headless_supervisor_reaps_failure(store: SessionStore, tmp_path: Path) 
 def test_attached_launch_records_current_process_as_supervisor(store: SessionStore) -> None:
     final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached), store)
     assert final.supervisor_pid == os.getpid()
+
+
+def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_provenance: SessionProvenance = {
+        "git_sha": "b" * 40,
+        "git_dirty": True,
+        "script_hash": None,
+        "lockfile_hash": "sha256:abc123",
+        "python_version": "3.14.0",
+        "python_path": Path("/usr/bin/python3"),
+        "host": "testhost",
+        "os": "linux",
+        "arch": "aarch64",
+    }
+    calls: list[tuple[object, ...]] = []
+
+    def fake_gather(*args: object) -> SessionProvenance:
+        calls.append(args)
+        return fake_provenance
+
+    monkeypatch.setattr("psoul.launch.gather", fake_gather)
+    req = _script_request("pass", launch_mode=LaunchMode.attached)
+    final = launch_attached(req, store)
+
+    assert calls == [(TargetType.script, "-c", req.cwd)]
+    assert final.git_sha == "b" * 40
+    assert final.git_dirty is True
+    assert final.script_hash is None
+    assert final.lockfile_hash == "sha256:abc123"
+    assert final.python_version == "3.14.0"
+    assert final.python_path == Path("/usr/bin/python3")
+    assert final.host == "testhost"
+    assert final.os == "linux"
+    assert final.arch == "aarch64"
+
+
+def _get_result(store: SessionStore, session_id: str) -> dict[str, object]:
+    """Read the results row for a session, returning a plain dict."""
+    store.conn.row_factory = None
+    cur = store.conn.execute("SELECT * FROM results WHERE session_id = ?", [session_id])
+    cols = [d[0] for d in cur.description]
+    row = cur.fetchone()
+    store.conn.row_factory = __import__("sqlite3").Row
+    assert row is not None, f"no result row for {session_id}"
+    return dict(zip(cols, row, strict=True))
+
+
+def test_attached_exit_records_result_success(store: SessionStore) -> None:
+    final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached, name="res-ok"), store)
+    assert final.state == SessionState.exited
+    result = _get_result(store, "res-ok")
+    assert result["outcome"] == "exited"
+    assert result["exit_code"] == 0
+    assert result["duration_seconds"] is not None
+    assert result["end_time"] is not None
+
+
+def test_attached_exit_records_result_failure(store: SessionStore) -> None:
+    final = launch_attached(
+        _script_request("import sys; sys.exit(42)", launch_mode=LaunchMode.attached, name="res-fail"), store
+    )
+    assert final.state == SessionState.failed
+    result = _get_result(store, "res-fail")
+    assert result["outcome"] == "failed"
+    assert result["exit_code"] == 42
+    assert result["duration_seconds"] is not None
+    assert result["end_time"] is not None
+
+
+def test_wait_for_exit_records_result_when_wait_raises(store: SessionStore) -> None:
+    """Regression: if proc.wait() raises, the session must still transition out of running."""
+    store.create(
+        Session(
+            session_id="crash-test",
+            state=SessionState.starting,
+            launch_mode=LaunchMode.attached,
+            launch_time=datetime.now(UTC),
+            psoul_version=VERSION,
+        )
+    )
+    store.update("crash-test", state=SessionState.running)
+
+    class FakeProc:
+        returncode = 1
+
+        def wait(self) -> None:
+            raise OSError("fake crash")
+
+    with pytest.raises(OSError, match="fake crash"):
+        wait_for_exit("crash-test", FakeProc(), store)  # ty: ignore[invalid-argument-type]
+
+    final = store.get("crash-test")
+    assert final is not None
+    assert final.state == SessionState.failed
+    result = _get_result(store, "crash-test")
+    assert result["outcome"] == "failed"
+    assert result["exit_code"] == 1
 
 
 @requires_fork

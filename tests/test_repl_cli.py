@@ -25,6 +25,7 @@ from psoul.cli.repl import (
     run_repl,
 )
 from psoul.db import open_db
+from psoul.provenance import SessionProvenance
 from psoul.repl import ReplEngine
 from psoul.session import LaunchMode, Session, SessionState, TargetType
 from psoul.store import SessionStore
@@ -243,5 +244,107 @@ def test_run_repl_exits_cleanly_and_records_supervisor_pid(db_path: Path, monkey
         assert session is not None
         assert session.state is SessionState.exited
         assert session.supervisor_pid == os.getpid()
+    finally:
+        conn.close()
+
+
+def test_run_repl_populates_provenance(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_provenance: SessionProvenance = {
+        "git_sha": "c" * 40,
+        "git_dirty": False,
+        "script_hash": None,
+        "lockfile_hash": None,
+        "python_version": "3.14.0",
+        "python_path": Path("/usr/bin/python3"),
+        "host": "testhost",
+        "os": "linux",
+        "arch": "aarch64",
+    }
+    calls: list[tuple[object, ...]] = []
+
+    def fake_gather(*args: object) -> SessionProvenance:
+        calls.append(args)
+        return fake_provenance
+
+    monkeypatch.setattr("psoul.cli.repl.gather", fake_gather)
+
+    class FakePromptSession:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def prompt(self, _message: str) -> str:
+            raise EOFError
+
+    monkeypatch.setattr("psoul.cli.repl.PromptSession", FakePromptSession)
+    conn = open_db(db_path.parent)
+    try:
+        run_repl("repl-prov", conn, db_path)
+        assert calls == [(TargetType.repl, None, Path.cwd())]
+        session = SessionStore(conn).get("repl-prov")
+        assert session is not None
+        assert session.git_sha == "c" * 40
+        assert session.git_dirty is False
+        assert session.script_hash is None
+        assert session.lockfile_hash is None
+        assert session.python_version == "3.14.0"
+        assert session.python_path == Path("/usr/bin/python3")
+        assert session.host == "testhost"
+        assert session.os == "linux"
+        assert session.arch == "aarch64"
+    finally:
+        conn.close()
+
+
+def _get_repl_result(conn: sqlite3.Connection, session_id: str) -> dict[str, object]:
+    """Read the results row for a REPL session."""
+    cur = conn.execute("SELECT * FROM results WHERE session_id = ?", [session_id])
+    cols = [d[0] for d in cur.description]
+    row = cur.fetchone()
+    assert row is not None, f"no result row for {session_id}"
+    return dict(zip(cols, row, strict=True))
+
+
+def test_run_repl_records_result_on_clean_exit(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePromptSession:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def prompt(self, _message: str) -> str:
+            raise EOFError
+
+    monkeypatch.setattr("psoul.cli.repl.PromptSession", FakePromptSession)
+    conn = open_db(db_path.parent)
+    try:
+        run_repl("repl-res-ok", conn, db_path)
+        result = _get_repl_result(conn, "repl-res-ok")
+        assert result["outcome"] == "exited"
+        assert result["exit_code"] is None
+        assert result["duration_seconds"] is not None
+        assert result["end_time"] is not None
+    finally:
+        conn.close()
+
+
+def test_run_repl_records_result_on_exception(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingPromptSession:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def prompt(self, _message: str) -> str:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("psoul.cli.repl.PromptSession", FailingPromptSession)
+    conn = open_db(db_path.parent)
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            run_repl("repl-res-fail", conn, db_path)
+        session = SessionStore(conn).get("repl-res-fail")
+        assert session is not None
+        assert session.state == SessionState.failed
+        result = _get_repl_result(conn, "repl-res-fail")
+        assert result["outcome"] == "failed"
+        assert result["exit_code"] is None
+        assert result["duration_seconds"] is not None
+        assert result["end_time"] is not None
     finally:
         conn.close()
