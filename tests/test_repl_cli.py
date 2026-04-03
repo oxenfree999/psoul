@@ -144,7 +144,7 @@ def _seed_session(tmp_path: Path, session_id: str) -> Path:
     )
     conn.close()
     config = tmp_path / "psoul.toml"
-    config.write_text(f'[paths]\nstate_dir = "{state_dir}"\n')
+    config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n")
     return config
 
 
@@ -153,7 +153,7 @@ class TestReplCLI:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         config = tmp_path / "psoul.toml"
-        config.write_text(f'[paths]\nstate_dir = "{state_dir}"\n')
+        config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n")
         calls: list[tuple[str, Path]] = []
         monkeypatch.setattr("psoul.cli.main.resolve_session_id", lambda _name: "bare-repl")
         monkeypatch.setattr(
