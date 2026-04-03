@@ -6,10 +6,25 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path, PureWindowsPath
+from typing import TypedDict
 
 from psoul.session import TargetType
 
 _LOCKFILE_CANDIDATES = ("uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock", "requirements.txt")
+
+
+class SessionProvenance(TypedDict):
+    """Session fields populated from launch-time provenance."""
+
+    git_sha: str | None
+    git_dirty: bool | None
+    lockfile_hash: str | None
+    script_hash: str | None
+    python_version: str
+    python_path: Path
+    host: str
+    os: str
+    arch: str
 
 
 def _is_absolute_target(target: str) -> bool:
@@ -92,7 +107,7 @@ def script_hash(target_type: TargetType, target: str | None, cwd: Path) -> str |
     return file_hash(path)
 
 
-def gather(target_type: TargetType, target: str | None, cwd: Path) -> dict[str, object]:
+def gather(target_type: TargetType, target: str | None, cwd: Path) -> SessionProvenance:
     """Collect all provenance fields as a dict compatible with Session kwargs."""
     return {
         "git_sha": git_sha(cwd),

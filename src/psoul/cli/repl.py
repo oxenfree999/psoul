@@ -25,6 +25,7 @@ from prompt_toolkit.validation import ValidationError, Validator
 from pygments.lexers import PythonLexer  # ty: ignore[unresolved-import]
 from rich.console import Console
 
+from psoul.provenance import gather
 from psoul.repl import ReplEngine
 from psoul.session import LaunchMode, Session, SessionState, TargetType
 from psoul.store import SessionStore
@@ -256,6 +257,7 @@ def _repl_key_bindings(engine: ReplEngine, completer: PythonCompleter) -> KeyBin
 def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
     """Run an interactive REPL session with prompt_toolkit."""
     store = SessionStore(conn)
+    provenance = gather(TargetType.repl, None, Path.cwd())
     session = Session(
         session_id=session_id,
         state=SessionState.starting,
@@ -263,6 +265,7 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
         launch_time=datetime.now(UTC),
         psoul_version=VERSION,
         target_type=TargetType.repl,
+        **provenance,
     )
     store.create(session)
     store.update(session_id, state=SessionState.running, supervisor_pid=os.getpid())

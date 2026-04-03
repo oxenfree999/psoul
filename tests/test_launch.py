@@ -22,6 +22,7 @@ from psoul.launch import (
     parse_launch_target,
     resolve_session_id,
 )
+from psoul.provenance import SessionProvenance
 from psoul.session import LaunchMode, Session, SessionState, TargetType
 from psoul.store import SessionStore
 from psoul.version import VERSION
@@ -169,6 +170,40 @@ def test_headless_supervisor_reaps_failure(store: SessionStore, tmp_path: Path) 
 def test_attached_launch_records_current_process_as_supervisor(store: SessionStore) -> None:
     final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached), store)
     assert final.supervisor_pid == os.getpid()
+
+
+def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_provenance: SessionProvenance = {
+        "git_sha": "b" * 40,
+        "git_dirty": True,
+        "script_hash": None,
+        "lockfile_hash": "sha256:abc123",
+        "python_version": "3.14.0",
+        "python_path": Path("/usr/bin/python3"),
+        "host": "testhost",
+        "os": "linux",
+        "arch": "aarch64",
+    }
+    calls: list[tuple[object, ...]] = []
+
+    def fake_gather(*args: object) -> SessionProvenance:
+        calls.append(args)
+        return fake_provenance
+
+    monkeypatch.setattr("psoul.launch.gather", fake_gather)
+    req = _script_request("pass", launch_mode=LaunchMode.attached)
+    final = launch_attached(req, store)
+
+    assert calls == [(TargetType.script, "-c", req.cwd)]
+    assert final.git_sha == "b" * 40
+    assert final.git_dirty is True
+    assert final.script_hash is None
+    assert final.lockfile_hash == "sha256:abc123"
+    assert final.python_version == "3.14.0"
+    assert final.python_path == Path("/usr/bin/python3")
+    assert final.host == "testhost"
+    assert final.os == "linux"
+    assert final.arch == "aarch64"
 
 
 @requires_fork

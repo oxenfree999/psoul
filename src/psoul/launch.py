@@ -9,6 +9,7 @@ from types import MappingProxyType
 
 from psoul.db import open_db
 from psoul.names import generate_session_id
+from psoul.provenance import gather
 from psoul.session import LaunchMode, Session, SessionState, TargetType, validate_session_id
 from psoul.store import SessionStore
 from psoul.version import VERSION
@@ -82,6 +83,7 @@ def build_launch_request(
 
 def _create_session(request: LaunchRequest, store: SessionStore) -> Session:
     """Persist a new session in starting state and return it."""
+    provenance = gather(request.target.target_type, request.target.target, request.cwd)
     session = Session(
         session_id=request.session_id,
         state=SessionState.starting,
@@ -93,6 +95,7 @@ def _create_session(request: LaunchRequest, store: SessionStore) -> Session:
         target_args=list(request.target.target_args),
         target_cwd=request.cwd,
         tags=dict(request.tags) if request.tags is not None else None,
+        **provenance,
     )
     return store.create(session)
 
