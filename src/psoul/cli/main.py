@@ -12,10 +12,11 @@ import typer
 
 from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.logging import configure_logging, resolve_log_level
+from psoul.cli.repl import run_repl
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
 from psoul.config import PsoulConfig, find_config_file, generate_config, load_config
-from psoul.db import open_db, resolve_state_dir
-from psoul.launch import build_launch_request, launch_attached, launch_headless
+from psoul.db import DB_NAME, open_db, resolve_state_dir
+from psoul.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
 from psoul.session import LaunchMode, Session, SessionState
 from psoul.store import SessionStore
 from psoul.version import VERSION
@@ -86,8 +87,39 @@ def _main(
     configure_logging(log_level, OutputFormat.text)
 
     if ctx.invoked_subcommand is None:
-        print(ctx.get_help())
-        raise typer.Exit(ExitCode.SUCCESS)
+        _launch_repl(ctx)
+
+
+def _launch_repl(ctx: typer.Context, name: str | None = None) -> None:
+    """Shared REPL launch logic for bare `psoul` and `psoul repl`."""
+    state: GlobalState = ctx.obj
+    cfg = _load_resolved_config(state.config_override)
+    try:
+        session_id = resolve_session_id(name)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE) from exc
+    state_dir = resolve_state_dir(cfg.paths.state_dir)
+    conn = open_db(state_dir)
+    try:
+        if SessionStore(conn).get(session_id) is not None:
+            print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR)
+        run_repl(session_id, conn, db_path=state_dir / DB_NAME)
+    except sqlite3.IntegrityError:
+        print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    finally:
+        conn.close()
+
+
+@cli.command()
+def repl(
+    ctx: typer.Context,
+    name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
+) -> None:
+    """Start an interactive REPL session."""
+    _launch_repl(ctx, name=name)
 
 
 @cli.command()

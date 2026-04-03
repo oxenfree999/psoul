@@ -47,6 +47,7 @@ def test_main_help() -> None:
 │                                                    exit.                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ repl     Start an interactive REPL session.                                  │
 │ doctor   Check psoul environment and report status.                          │
 │ run      Launch a Python target as a managed session.                        │
 │ ps       List sessions.                                                      │
