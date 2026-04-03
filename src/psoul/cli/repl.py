@@ -12,10 +12,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import get_app
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
-from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.enums import DEFAULT_BUFFER, EditingMode
+from prompt_toolkit.filters import Condition, emacs_insert_mode, has_focus, vi_insert_mode
 from prompt_toolkit.history import History, ThreadedHistory
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.validation import ValidationError, Validator
 from pygments.lexers import PythonLexer  # ty: ignore[unresolved-import]
@@ -144,6 +148,111 @@ class PythonValidator(Validator):
             raise ValidationError(message="")
 
 
+def _auto_newline(buf: Buffer) -> None:
+    """Insert a newline with Python-aware indentation.
+
+    Copies leading whitespace from the current line and adds four extra
+    spaces after lines ending with a colon — following ptpython's
+    auto_newline pattern.
+    """
+    current_line = buf.document.current_line_before_cursor.rstrip()
+    buf.insert_text("\n")
+    for c in current_line:
+        if c.isspace():
+            buf.insert_text(c)
+        else:
+            break
+    if current_line.endswith(":"):
+        buf.insert_text("    ")
+
+
+def _at_end(buf: Buffer) -> bool:
+    """Check whether the cursor is at the effective end of the buffer."""
+    text_after = buf.document.text_after_cursor
+    return not text_after or (text_after.isspace() and "\n" not in text_after)
+
+
+def _enter_handler(event: KeyPressEvent, engine: ReplEngine) -> None:
+    """Handle Enter: accept completion, auto-indent, or submit."""
+    buf = event.current_buffer
+
+    if buf.complete_state:
+        if buf.complete_state.current_completion:
+            buf.apply_completion(buf.complete_state.current_completion)
+        buf.complete_state = None
+        return
+
+    at_end = _at_end(buf)
+
+    # On a blank/whitespace-only line at the end, try submitting
+    # the rstripped text.  codeop needs a trailing newline (not
+    # indentation) to recognise a complete block, so we strip
+    # trailing whitespace and append "\n" for the check.
+    current_line = buf.document.current_line_before_cursor
+    if at_end and (not current_line or current_line.isspace()):
+        stripped = buf.text.rstrip()
+        if stripped and engine.is_complete(stripped + "\n") is not False:
+            submit_text = stripped + "\n"
+            buf.document = Document(text=submit_text, cursor_position=len(submit_text))
+            buf.validate_and_handle()
+            return
+
+    status = engine.is_complete(buf.text)
+
+    if status is False:
+        _auto_newline(buf)
+    elif at_end:
+        buf.validate_and_handle()
+    else:
+        buf.insert_text("\n")
+
+
+def _repl_key_bindings(engine: ReplEngine, completer: PythonCompleter) -> KeyBindings:
+    """Key bindings for the REPL prompt.
+
+    Tab: insert 4 spaces on whitespace-only lines, otherwise complete.
+    Single-match Tab auto-applies; multiple matches open the menu.
+
+    Enter: accept completion if the menu is active; auto-indent if
+    incomplete; submit if complete and cursor is at the end; otherwise
+    insert a plain newline.
+    """
+    bindings = KeyBindings()
+
+    @Condition
+    def _tab_should_indent() -> bool:
+        buf = get_app().current_buffer
+        if buf.complete_state:
+            return False
+        before = buf.document.current_line_before_cursor
+        return bool(buf.text and (not before or before.isspace()))
+
+    @bindings.add("tab", filter=has_focus(DEFAULT_BUFFER) & _tab_should_indent)
+    def _handle_tab_indent(event: KeyPressEvent) -> None:
+        event.current_buffer.insert_text("    ")
+
+    @bindings.add("tab", filter=has_focus(DEFAULT_BUFFER) & ~_tab_should_indent)
+    def _handle_tab_complete(event: KeyPressEvent) -> None:
+        buf = event.current_buffer
+        if buf.complete_state:
+            buf.complete_next()
+            return
+        completions = list(completer.get_completions(buf.document, CompleteEvent()))
+        if len(completions) == 1:
+            buf.apply_completion(completions[0])
+        elif completions:
+            buf.start_completion(select_first=True)
+
+    @bindings.add(
+        "enter",
+        filter=has_focus(DEFAULT_BUFFER) & (vi_insert_mode | emacs_insert_mode),
+    )
+    def _handle_enter(event: KeyPressEvent) -> None:
+        _enter_handler(event, engine)
+
+    return bindings
+
+
 def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
     """Run an interactive REPL session with prompt_toolkit."""
     store = SessionStore(conn)
@@ -164,11 +273,13 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
     failed = False
 
     try:
+        completer = PythonCompleter(engine.namespace)
         prompt = PromptSession(
             history=ThreadedHistory(history),
             lexer=PygmentsLexer(PythonLexer),
-            completer=PythonCompleter(engine.namespace),
+            completer=completer,
             validator=PythonValidator(engine),
+            key_bindings=_repl_key_bindings(engine, completer),
             multiline=True,
             prompt_continuation="... ",
             editing_mode=EditingMode.EMACS,

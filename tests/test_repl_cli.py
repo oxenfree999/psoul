@@ -7,13 +7,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
+from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.validation import ValidationError
 from typer.testing import CliRunner
 
 from psoul.cli.main import cli
-from psoul.cli.repl import PythonCompleter, PythonValidator, SqliteHistory, run_repl
+from psoul.cli.repl import (
+    PythonCompleter,
+    PythonValidator,
+    SqliteHistory,
+    _repl_key_bindings,
+    run_repl,
+)
 from psoul.db import open_db
 from psoul.repl import ReplEngine
 from psoul.session import LaunchMode, Session, SessionState, TargetType
@@ -173,6 +183,48 @@ class TestReplCLI:
         result = runner.invoke(cli, ["--config", str(config), "repl", "--name", "taken"])
         assert result.exit_code != 0
         assert "already exists" in result.output
+
+
+def _prompt_with_keys(keys: str) -> str:
+    """Feed keystrokes into a real PromptSession with our key bindings."""
+    engine = ReplEngine()
+    completer = PythonCompleter(engine.namespace)
+    with create_pipe_input() as inp:
+        inp.send_text(keys)
+        session = PromptSession(
+            input=inp,
+            output=DummyOutput(),
+            key_bindings=_repl_key_bindings(engine, completer),
+            completer=completer,
+            validator=PythonValidator(engine),
+            multiline=True,
+            editing_mode=EditingMode.EMACS,
+        )
+        return session.prompt(">>> ")
+
+
+class TestKeyBindings:
+    @pytest.mark.parametrize(
+        ("keys", "expected"),
+        [
+            ("x=5\r", "x=5"),
+            ("1+1\r", "1+1"),
+            ("def f():\rreturn 1\r\r", "def f():\n    return 1\n"),
+            ("def f():\r\treturn 1\r\r", "def f():\n        return 1\n"),
+            ("pri\t\r", "print"),
+            ("x=5\x02\x02\r\x1b>\r", "x\n=5"),
+        ],
+        ids=[
+            "submit-assignment",
+            "submit-expression",
+            "auto-indent-after-colon",
+            "tab-indents-whitespace-line",
+            "tab-completes-single-match",
+            "enter-mid-buffer-inserts-newline",
+        ],
+    )
+    def test_key_bindings(self, keys: str, expected: str) -> None:
+        assert _prompt_with_keys(keys) == expected
 
 
 def test_run_repl_exits_cleanly_and_records_supervisor_pid(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
