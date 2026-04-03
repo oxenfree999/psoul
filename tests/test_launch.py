@@ -21,6 +21,7 @@ from psoul.launch import (
     launch_headless,
     parse_launch_target,
     resolve_session_id,
+    wait_for_exit,
 )
 from psoul.provenance import SessionProvenance
 from psoul.session import LaunchMode, Session, SessionState, TargetType
@@ -204,6 +205,69 @@ def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: 
     assert final.host == "testhost"
     assert final.os == "linux"
     assert final.arch == "aarch64"
+
+
+def _get_result(store: SessionStore, session_id: str) -> dict[str, object]:
+    """Read the results row for a session, returning a plain dict."""
+    store.conn.row_factory = None
+    cur = store.conn.execute("SELECT * FROM results WHERE session_id = ?", [session_id])
+    cols = [d[0] for d in cur.description]
+    row = cur.fetchone()
+    store.conn.row_factory = __import__("sqlite3").Row
+    assert row is not None, f"no result row for {session_id}"
+    return dict(zip(cols, row, strict=True))
+
+
+def test_attached_exit_records_result_success(store: SessionStore) -> None:
+    final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached, name="res-ok"), store)
+    assert final.state == SessionState.exited
+    result = _get_result(store, "res-ok")
+    assert result["outcome"] == "exited"
+    assert result["exit_code"] == 0
+    assert result["duration_seconds"] is not None
+    assert result["end_time"] is not None
+
+
+def test_attached_exit_records_result_failure(store: SessionStore) -> None:
+    final = launch_attached(
+        _script_request("import sys; sys.exit(42)", launch_mode=LaunchMode.attached, name="res-fail"), store
+    )
+    assert final.state == SessionState.failed
+    result = _get_result(store, "res-fail")
+    assert result["outcome"] == "failed"
+    assert result["exit_code"] == 42
+    assert result["duration_seconds"] is not None
+    assert result["end_time"] is not None
+
+
+def test_wait_for_exit_records_result_when_wait_raises(store: SessionStore) -> None:
+    """Regression: if proc.wait() raises, the session must still transition out of running."""
+    store.create(
+        Session(
+            session_id="crash-test",
+            state=SessionState.starting,
+            launch_mode=LaunchMode.attached,
+            launch_time=datetime.now(UTC),
+            psoul_version=VERSION,
+        )
+    )
+    store.update("crash-test", state=SessionState.running)
+
+    class FakeProc:
+        returncode = 1
+
+        def wait(self) -> None:
+            raise OSError("fake crash")
+
+    with pytest.raises(OSError, match="fake crash"):
+        wait_for_exit("crash-test", FakeProc(), store)  # ty: ignore[invalid-argument-type]
+
+    final = store.get("crash-test")
+    assert final is not None
+    assert final.state == SessionState.failed
+    result = _get_result(store, "crash-test")
+    assert result["outcome"] == "failed"
+    assert result["exit_code"] == 1
 
 
 @requires_fork

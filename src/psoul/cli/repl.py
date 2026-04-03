@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 import traceback
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -274,6 +275,7 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
     history = SqliteHistory(db_path, session_id=session_id)
     console = Console()
     failed = False
+    start = time.monotonic()
 
     try:
         completer = PythonCompleter(engine.namespace)
@@ -310,8 +312,16 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
         failed = True
         raise
     finally:
-        store.update(session_id, state=SessionState.stopping)
-        store.update(
-            session_id,
-            state=SessionState.failed if failed else SessionState.exited,
-        )
+        duration = time.monotonic() - start
+        final_state = SessionState.failed if failed else SessionState.exited
+        try:
+            store.record_result(
+                session_id=session_id,
+                outcome="failed" if failed else "exited",
+                exit_code=None,
+                end_time=datetime.now(UTC),
+                duration_seconds=duration,
+            )
+        finally:
+            store.update(session_id, state=SessionState.stopping)
+            store.update(session_id, state=final_state)

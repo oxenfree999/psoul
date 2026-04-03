@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -143,6 +144,26 @@ def launch_attached(request: LaunchRequest, store: SessionStore) -> Session:
 
 def wait_for_exit(session_id: str, proc: subprocess.Popen[bytes], store: SessionStore) -> Session:
     """Block until the process exits, then update the session to its final state."""
-    proc.wait()
-    store.update(session_id, state=SessionState.stopping)
-    return store.update(session_id, state=SessionState.exited if proc.returncode == 0 else SessionState.failed)
+    start = time.monotonic()
+    final_session: Session | None = None
+    try:
+        proc.wait()
+    finally:
+        duration = time.monotonic() - start
+        outcome = "exited" if proc.returncode is not None and proc.returncode == 0 else "failed"
+        final_state = SessionState.exited if proc.returncode == 0 else SessionState.failed
+        try:
+            store.record_result(
+                session_id=session_id,
+                outcome=outcome,
+                exit_code=proc.returncode,
+                end_time=datetime.now(UTC),
+                duration_seconds=duration,
+            )
+        finally:
+            store.update(session_id, state=SessionState.stopping)
+            final_session = store.update(session_id, state=final_state)
+    if final_session is None:  # pragma: no cover
+        msg = f"session finalization failed: {session_id}"
+        raise RuntimeError(msg)
+    return final_session
