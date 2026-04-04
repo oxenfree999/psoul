@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -435,4 +436,4 @@ def test_unknown_flag_not_swallowed_by_disambiguation() -> None:
     """``psoul --bad script.py`` still errors — disambiguation is narrow."""
     result = runner.invoke(cli, ["--bad", "script.py"])
     assert result.exit_code == 2
-    assert "No such option: --bad" in result.output
+    assert "No such option: --bad" in click.unstyle(result.output)
