@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,9 @@ from typer.testing import CliRunner
 
 from psoul.cli.main import cli, parse_tags
 from psoul.db import open_db
+from psoul.session import LaunchMode, Session, SessionState, TargetType
 from psoul.store import SessionStore
+from psoul.version import VERSION
 
 runner = CliRunner()
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
@@ -23,6 +26,26 @@ def _write_config(tmp_path: Path) -> tuple[Path, Path]:
     config = tmp_path / "psoul.toml"
     config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n")
     return config, state_dir
+
+
+def _store_tagged_session(state_dir: Path, name: str, tags: dict[str, str] | None = None) -> None:
+    """Insert a running session with optional tags directly into the store."""
+    conn = open_db(state_dir)
+    store = SessionStore(conn)
+    store.create(
+        Session(
+            session_id=name,
+            state=SessionState.starting,
+            launch_mode=LaunchMode.headless,
+            launch_time=datetime.now(UTC),
+            psoul_version=VERSION,
+            target_type=TargetType.script,
+            target="test.py",
+            tags=tags,
+        )
+    )
+    store.update(name, state=SessionState.running)
+    conn.close()
 
 
 class TestParseTags:
@@ -122,8 +145,9 @@ def test_repl_tag_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     [
         ["run", "--name", "bad-tag-run", "--tag", "broken", "-m", "http.server"],
         ["repl", "--name", "bad-tag-repl", "--tag", "broken"],
+        ["ps", "--tag", "broken"],
     ],
-    ids=["run", "repl"],
+    ids=["run", "repl", "ps"],
 )
 def test_tag_cli_rejects_malformed_input(tmp_path: Path, args: list[str]) -> None:
     config, _state_dir = _write_config(tmp_path)
@@ -131,3 +155,63 @@ def test_tag_cli_rejects_malformed_input(tmp_path: Path, args: list[str]) -> Non
     assert result.exit_code == 2
     assert "Invalid value" in result.output
     assert "expected key=value" in result.output
+
+
+class TestPsTagFilter:
+    """Tests for ps --tag filtering: AND logic, superset match, and negative cases."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config, state_dir = _write_config(tmp_path)
+        self.config = str(config)
+        _store_tagged_session(state_dir, "all-tags", {"env": "dev", "team": "backend", "region": "us"})
+        _store_tagged_session(state_dir, "partial-tags", {"env": "dev"})
+        _store_tagged_session(state_dir, "no-tags")
+        _store_tagged_session(state_dir, "wrong-value", {"env": "prod"})
+
+    @pytest.mark.parametrize(
+        ("tags", "expected_ids"),
+        [
+            (["env=dev"], {"all-tags", "partial-tags"}),
+            (["env=dev", "team=backend"], {"all-tags"}),
+            (["env=dev", "region=us"], {"all-tags"}),
+            (["env=prod"], {"wrong-value"}),
+            (["env=staging"], set()),
+            (["team=backend"], {"all-tags"}),
+        ],
+        ids=[
+            "single-tag-matches-superset-and-exact",
+            "multiple-tags-and-logic",
+            "superset-match",
+            "wrong-value-only",
+            "no-match-returns-empty",
+            "excludes-no-tags-and-partial",
+        ],
+    )
+    def test_filter(self, tags: list[str], expected_ids: set[str]) -> None:
+        args = ["--config", self.config, "ps", "--json"]
+        for t in tags:
+            args.extend(["--tag", t])
+        result = runner.invoke(cli, args)
+        assert result.exit_code == 0
+        actual_ids = {r["session_id"] for r in json.loads(result.output)}
+        assert actual_ids == expected_ids
+
+
+def test_status_displays_tags(tmp_path: Path) -> None:
+    config, state_dir = _write_config(tmp_path)
+    _store_tagged_session(state_dir, "status-tag", {"env": "dev", "team": "backend"})
+    conn = open_db(state_dir)
+    try:
+        session = SessionStore(conn).get("status-tag")
+    finally:
+        conn.close()
+    assert session is not None
+    assert session.tags == {"env": "dev", "team": "backend"}
+    text_result = runner.invoke(cli, ["--config", str(config), "status", "status-tag"])
+    assert text_result.exit_code == 0
+    assert "tags: {'env': 'dev', 'team': 'backend'}" in text_result.output
+    json_result = runner.invoke(cli, ["--config", str(config), "status", "status-tag", "--json"])
+    assert json_result.exit_code == 0
+    data = json.loads(json_result.output)
+    assert data["tags"] == {"env": "dev", "team": "backend"}

@@ -256,6 +256,9 @@ def run(
 def ps(
     ctx: typer.Context,
     state: Annotated[SessionState | None, typer.Option("--state", help="Filter by session state.")] = None,
+    tag: Annotated[
+        list[str] | None, typer.Option("--tag", help="Filter by tag key=value (repeatable, AND logic).")
+    ] = None,
     json_flag: Annotated[bool, typer.Option("--json", help="Output JSON instead of text.")] = False,
 ) -> None:
     """List sessions."""
@@ -263,7 +266,7 @@ def ps(
     cfg = _load_resolved_config(gs.config_override)
     conn = open_db(resolve_state_dir(cfg.paths.state_dir))
     try:
-        sessions = SessionStore(conn).list(state=state)
+        sessions = SessionStore(conn).list(state=state, tags=parse_tags(tag))
     finally:
         conn.close()
     if json_flag:
