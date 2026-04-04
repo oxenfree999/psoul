@@ -59,6 +59,33 @@ def _resolve_session_selector(store: SessionStore, selector: str) -> Session:
     return matches[0]
 
 
+def parse_tags(raw: list[str] | None) -> dict[str, str] | None:
+    """Parse --tag key=value CLI arguments into a tag dict.
+
+    Returns None when *raw* is None or empty.  Splits each item on the
+    first ``=`` so values may contain additional ``=`` characters.  Keys
+    and values are stripped of surrounding whitespace.  Empty values
+    (``key=``) are allowed; missing ``=`` or an empty key (after
+    stripping) are rejected with ``typer.BadParameter``.  Duplicate keys
+    use last-wins semantics (natural dict assignment order).
+    """
+    if not raw:
+        return None
+    tags: dict[str, str] = {}
+    for item in raw:
+        if "=" not in item:
+            msg = f"invalid tag (expected key=value): {item!r}"
+            raise typer.BadParameter(msg)
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            msg = f"invalid tag (empty key): {item!r}"
+            raise typer.BadParameter(msg)
+        tags[key] = value
+    return tags
+
+
 @cli.callback()
 def _main(
     ctx: typer.Context,
