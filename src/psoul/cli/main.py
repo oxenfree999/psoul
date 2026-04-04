@@ -117,7 +117,7 @@ def _main(
         _launch_repl(ctx)
 
 
-def _launch_repl(ctx: typer.Context, name: str | None = None) -> None:
+def _launch_repl(ctx: typer.Context, name: str | None = None, tags: dict[str, str] | None = None) -> None:
     """Shared REPL launch logic for bare `psoul` and `psoul repl`."""
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
@@ -132,7 +132,7 @@ def _launch_repl(ctx: typer.Context, name: str | None = None) -> None:
         if SessionStore(conn).get(session_id) is not None:
             print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
             raise typer.Exit(ExitCode.ERROR)
-        run_repl(session_id, conn, db_path=state_dir / DB_NAME)
+        run_repl(session_id, conn, db_path=state_dir / DB_NAME, tags=tags)
     except sqlite3.IntegrityError:
         print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
@@ -144,9 +144,10 @@ def _launch_repl(ctx: typer.Context, name: str | None = None) -> None:
 def repl(
     ctx: typer.Context,
     name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
+    tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
 ) -> None:
     """Start an interactive REPL session."""
-    _launch_repl(ctx, name=name)
+    _launch_repl(ctx, name=name, tags=parse_tags(tag))
 
 
 @cli.command()
@@ -206,6 +207,7 @@ def run(
     module: Annotated[str | None, typer.Option("-m", help="Module to run.")] = None,
     name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
     headless: Annotated[bool, typer.Option("--headless", help="Launch in background.")] = False,
+    tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
 ) -> None:
     """Launch a Python target as a managed session."""
     state: GlobalState = ctx.obj
@@ -219,7 +221,7 @@ def run(
             extra_args=extra_args,
             name=name,
             headless=headless,
-            tags=None,
+            tags=parse_tags(tag),
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

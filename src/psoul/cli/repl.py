@@ -255,7 +255,7 @@ def _repl_key_bindings(engine: ReplEngine, completer: PythonCompleter) -> KeyBin
     return bindings
 
 
-def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
+def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path, tags: dict[str, str] | None = None) -> None:
     """Run an interactive REPL session with prompt_toolkit."""
     store = SessionStore(conn)
     provenance = gather(TargetType.repl, None, Path.cwd())
@@ -266,6 +266,7 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path) -> None:
         launch_time=datetime.now(UTC),
         psoul_version=VERSION,
         target_type=TargetType.repl,
+        tags=tags,
         **provenance,
     )
     store.create(session)
