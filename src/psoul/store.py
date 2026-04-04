@@ -317,8 +317,13 @@ class SessionStore:
             return None
         return _deserialize(row)
 
-    def list(self, *, state: SessionState | None = None) -> list[Session]:
-        """Return sessions ordered by launch_time descending, optionally filtered by state."""
+    def list(self, *, state: SessionState | None = None, tags: dict[str, str] | None = None) -> list[Session]:
+        """Return sessions ordered by launch_time descending, optionally filtered by state and tags.
+
+        Tag filtering uses AND semantics: a session matches when its tags
+        dict contains every key=value pair in *tags*. Sessions with extra
+        tags still match; sessions with no tags do not.
+        """
         if state is not None:
             rows = self.conn.execute(
                 "SELECT * FROM sessions WHERE state = ? ORDER BY launch_time DESC",
@@ -326,7 +331,11 @@ class SessionStore:
             ).fetchall()
         else:
             rows = self.conn.execute("SELECT * FROM sessions ORDER BY launch_time DESC").fetchall()
-        return [_deserialize(row) for row in rows]
+        sessions = [_deserialize(row) for row in rows]
+        if tags is not None:
+            filter_items = tags.items()
+            sessions = [s for s in sessions if s.tags is not None and filter_items <= s.tags.items()]
+        return sessions
 
     def update(self, session_id: str, **fields: object) -> Session:
         """Update mutable fields on an existing session.

@@ -168,7 +168,8 @@ class TestReplCLI:
         calls: list[tuple[str, Path]] = []
         monkeypatch.setattr("psoul.cli.main.resolve_session_id", lambda _name: "bare-repl")
         monkeypatch.setattr(
-            "psoul.cli.main.run_repl", lambda session_id, conn, db_path: calls.append((session_id, db_path))
+            "psoul.cli.main.run_repl",
+            lambda session_id, conn, db_path, tags=None: calls.append((session_id, db_path)),
         )
         result = runner.invoke(cli, ["--config", str(config)])
         assert result.exit_code == 0

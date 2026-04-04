@@ -59,6 +59,33 @@ def _resolve_session_selector(store: SessionStore, selector: str) -> Session:
     return matches[0]
 
 
+def parse_tags(raw: list[str] | None) -> dict[str, str] | None:
+    """Parse --tag key=value CLI arguments into a tag dict.
+
+    Returns None when *raw* is None or empty.  Splits each item on the
+    first ``=`` so values may contain additional ``=`` characters.  Keys
+    and values are stripped of surrounding whitespace.  Empty values
+    (``key=``) are allowed; missing ``=`` or an empty key (after
+    stripping) are rejected with ``typer.BadParameter``.  Duplicate keys
+    use last-wins semantics (natural dict assignment order).
+    """
+    if not raw:
+        return None
+    tags: dict[str, str] = {}
+    for item in raw:
+        if "=" not in item:
+            msg = f"invalid tag (expected key=value): {item!r}"
+            raise typer.BadParameter(msg)
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            msg = f"invalid tag (empty key): {item!r}"
+            raise typer.BadParameter(msg)
+        tags[key] = value
+    return tags
+
+
 @cli.callback()
 def _main(
     ctx: typer.Context,
@@ -90,7 +117,7 @@ def _main(
         _launch_repl(ctx)
 
 
-def _launch_repl(ctx: typer.Context, name: str | None = None) -> None:
+def _launch_repl(ctx: typer.Context, name: str | None = None, tags: dict[str, str] | None = None) -> None:
     """Shared REPL launch logic for bare `psoul` and `psoul repl`."""
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
@@ -105,7 +132,7 @@ def _launch_repl(ctx: typer.Context, name: str | None = None) -> None:
         if SessionStore(conn).get(session_id) is not None:
             print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
             raise typer.Exit(ExitCode.ERROR)
-        run_repl(session_id, conn, db_path=state_dir / DB_NAME)
+        run_repl(session_id, conn, db_path=state_dir / DB_NAME, tags=tags)
     except sqlite3.IntegrityError:
         print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
@@ -117,9 +144,10 @@ def _launch_repl(ctx: typer.Context, name: str | None = None) -> None:
 def repl(
     ctx: typer.Context,
     name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
+    tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
 ) -> None:
     """Start an interactive REPL session."""
-    _launch_repl(ctx, name=name)
+    _launch_repl(ctx, name=name, tags=parse_tags(tag))
 
 
 @cli.command()
@@ -179,6 +207,7 @@ def run(
     module: Annotated[str | None, typer.Option("-m", help="Module to run.")] = None,
     name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
     headless: Annotated[bool, typer.Option("--headless", help="Launch in background.")] = False,
+    tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
 ) -> None:
     """Launch a Python target as a managed session."""
     state: GlobalState = ctx.obj
@@ -192,7 +221,7 @@ def run(
             extra_args=extra_args,
             name=name,
             headless=headless,
-            tags=None,
+            tags=parse_tags(tag),
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -227,6 +256,9 @@ def run(
 def ps(
     ctx: typer.Context,
     state: Annotated[SessionState | None, typer.Option("--state", help="Filter by session state.")] = None,
+    tag: Annotated[
+        list[str] | None, typer.Option("--tag", help="Filter by tag key=value (repeatable, AND logic).")
+    ] = None,
     json_flag: Annotated[bool, typer.Option("--json", help="Output JSON instead of text.")] = False,
 ) -> None:
     """List sessions."""
@@ -234,7 +266,7 @@ def ps(
     cfg = _load_resolved_config(gs.config_override)
     conn = open_db(resolve_state_dir(cfg.paths.state_dir))
     try:
-        sessions = SessionStore(conn).list(state=state)
+        sessions = SessionStore(conn).list(state=state, tags=parse_tags(tag))
     finally:
         conn.close()
     if json_flag:
