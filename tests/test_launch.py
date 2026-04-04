@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -377,3 +378,62 @@ def test_launch_to_query_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert "e2e-fail" in runner.invoke(cli, ["ps", "--state", "failed"]).output
     detail = json.loads(runner.invoke(cli, ["status", "e2e-fail", "--json"]).output)
     assert detail["state"] == "failed"
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_bare_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``psoul script.py`` is equivalent to ``psoul run script.py``."""
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "hello.py"
+    script.write_text("pass")
+    result = runner.invoke(cli, [str(script)])
+    assert result.exit_code == 0
+    record = json.loads(result.output)
+    assert record["session_id"]
+    assert record["state"] == "starting"
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_bare_file_with_global_verbose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``psoul -v script.py`` — global options parsed before disambiguation."""
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "hello.py"
+    script.write_text("pass")
+    result = runner.invoke(cli, ["-v", str(script)])
+    assert result.exit_code == 0
+    record = json.loads(result.output)
+    assert record["session_id"]
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_bare_nonexistent_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``psoul nonexistent.py`` routes to run, not silently to the REPL."""
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    result = runner.invoke(cli, [str(tmp_path / "nonexistent.py")])
+    assert result.exit_code == 0
+    record = json.loads(result.output)
+    assert record["session_id"]
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_bare_file_passes_extra_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``psoul script.py extra --child-flag`` passes trailing tokens to run."""
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "echo.py"
+    script.write_text("pass")
+    result = runner.invoke(cli, [str(script), "extra", "--child-flag"])
+    assert result.exit_code == 0
+    sid = json.loads(result.output)["session_id"]
+    detail = json.loads(runner.invoke(cli, ["status", sid, "--json"]).output)
+    assert detail["target_args"] == ["extra", "--child-flag"]
+
+
+def test_unknown_flag_not_swallowed_by_disambiguation() -> None:
+    """``psoul --bad script.py`` still errors — disambiguation is narrow."""
+    result = runner.invoke(cli, ["--bad", "script.py"])
+    assert result.exit_code == 2
+    assert "No such option: --bad" in click.unstyle(result.output)

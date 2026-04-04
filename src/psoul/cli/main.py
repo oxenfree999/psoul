@@ -8,7 +8,9 @@ import tomllib
 from pathlib import Path
 from typing import Annotated
 
+import click
 import typer
+from typer.core import TyperGroup
 
 from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.logging import configure_logging, resolve_log_level
@@ -21,8 +23,31 @@ from psoul.session import LaunchMode, Session, SessionState
 from psoul.store import SessionStore
 from psoul.version import VERSION
 
+
+class DefaultRunGroup(TyperGroup):
+    """Route unrecognised top-level commands to ``run`` for file disambiguation.
+
+    Allows ``psoul script.py`` as shorthand for ``psoul run script.py``.
+    Only non-option first arguments are rerouted; unknown flags (e.g.
+    ``--bad``) propagate the original ``UsageError`` so Click's normal
+    error handling applies.
+    """
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        """Resolve *args* to a command, falling back to ``run`` for bare files."""
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            if args and not args[0].startswith("-"):
+                return super().resolve_command(ctx, ["run", *args])
+            raise
+
+
 cli = typer.Typer(
     name="psoul",
+    cls=DefaultRunGroup,
     help="A CLI and TUI Python session supervisor with batteries included.",
     invoke_without_command=True,
     context_settings={"help_option_names": ["--help", "-h"]},
