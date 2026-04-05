@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated
 
 import click
+import tomlkit.exceptions
 import typer
 from typer.core import TyperGroup
 
@@ -16,7 +17,7 @@ from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.logging import configure_logging, resolve_log_level
 from psoul.cli.repl import run_repl
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
-from psoul.config import PsoulConfig, find_config_file, generate_config, load_config
+from psoul.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
 from psoul.db import DB_NAME, open_db, resolve_state_dir
 from psoul.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
 from psoul.recovery import recover_sessions
@@ -214,14 +215,29 @@ def config_cmd(
 
 
 @config_app.command()
-def init(ctx: typer.Context) -> None:
-    """Write a default psoul.toml to the current directory."""
+def init(
+    ctx: typer.Context,
+    pyproject: Annotated[bool, typer.Option("--pyproject", help="Inject [tool.psoul] into pyproject.toml.")] = False,
+) -> None:
+    """Write default psoul config to the current directory."""
+    state: GlobalState = ctx.obj
+    if pyproject:
+        if state.config_override is not None:
+            print("Error: --config cannot be used with --pyproject.", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        try:
+            inject_pyproject_config(Path("pyproject.toml"))
+        except (tomlkit.exceptions.TOMLKitError, TypeError, ValueError, OSError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from exc
+        if not state.quiet:
+            print("Added [tool.psoul] section to pyproject.toml")
+        return
     dest = Path("psoul.toml")
     if dest.exists():
         print(f"Error: {dest} already exists.", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR)
     dest.write_text(generate_config())
-    state: GlobalState = ctx.obj
     if not state.quiet:
         print(f"Wrote {dest}")
 

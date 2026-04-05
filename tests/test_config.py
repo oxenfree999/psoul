@@ -5,6 +5,7 @@ import json
 import tomllib
 from pathlib import Path
 
+import click
 import pytest
 import tomlkit.exceptions
 from typer.testing import CliRunner
@@ -458,6 +459,96 @@ def test_config_init_refuses_overwrite(tmp_path: Path, monkeypatch: pytest.Monke
     (tmp_path / "psoul.toml").write_text("")
     result = runner.invoke(cli, ["config", "init"])
     assert result.exit_code == 1
+
+
+def test_config_init_pyproject_writes_discoverable_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "foo"\n')
+    result = runner.invoke(cli, ["config", "init", "--pyproject"])
+    assert result.exit_code == 0
+    assert "Added [tool.psoul] section to pyproject.toml" in click.unstyle(result.output)
+    data = tomllib.loads((tmp_path / "pyproject.toml").read_text())
+    assert "psoul" in data["tool"]
+    assert data["project"]["name"] == "foo"
+    # Discovery: psoul config should load from the injected section
+    result = runner.invoke(cli, ["config"])
+    assert result.exit_code == 0
+    assert "launch.mode = 'attached'" in click.unstyle(result.output)
+
+
+def test_config_init_psoul_toml_wins_over_pyproject(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[tool.psoul.launch]\nmode = "headless"\n')
+    (tmp_path / "psoul.toml").write_text('[launch]\nmode = "attached"\n')
+    result = runner.invoke(cli, ["config"])
+    assert result.exit_code == 0
+    assert "launch.mode = 'attached'" in click.unstyle(result.output)
+
+
+def test_config_init_pyproject_rejects_config_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "foo"\n')
+    result = runner.invoke(cli, ["--config", "custom.toml", "config", "init", "--pyproject"])
+    assert result.exit_code == 2
+    assert "--config cannot be used with --pyproject" in click.unstyle(result.output)
+
+
+@pytest.mark.parametrize(
+    ("content", "error_fragment"),
+    [
+        pytest.param(None, "pyproject.toml", id="missing_pyproject"),
+        pytest.param("[tool\nbroken", "Unexpected character", id="invalid_toml"),
+        pytest.param('[tool.psoul.launch]\nmode = "headless"\n', "[tool.psoul] already exists", id="existing_psoul"),
+        pytest.param("tool = 1\n", "[tool] is not a table", id="non_table_tool"),
+    ],
+)
+def test_config_init_pyproject_cli_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str | None,
+    error_fragment: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    if content is not None:
+        (tmp_path / "pyproject.toml").write_text(content)
+    result = runner.invoke(cli, ["config", "init", "--pyproject"])
+    assert result.exit_code == 1
+    output = click.unstyle(result.output)
+    assert f"Error: {error_fragment}" in output or error_fragment in output
+    assert "Traceback" not in output
+
+
+def test_config_init_pyproject_write_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "foo"\n')
+
+    def raise_permission_error(path: Path) -> None:
+        msg = "[Errno 13] Permission denied: 'pyproject.toml'"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr("psoul.cli.main.inject_pyproject_config", raise_permission_error)
+    result = runner.invoke(cli, ["config", "init", "--pyproject"])
+    assert result.exit_code == 1
+    output = click.unstyle(result.output)
+    assert "Error:" in output
+    assert "Permission denied" in output
+    assert "Traceback" not in output
+
+
+def test_config_init_pyproject_with_both_files_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "psoul.toml").write_text('[launch]\nmode = "attached"\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "foo"\n')
+    # --pyproject still injects into pyproject.toml
+    result = runner.invoke(cli, ["config", "init", "--pyproject"])
+    assert result.exit_code == 0
+    assert "Added [tool.psoul] section to pyproject.toml" in click.unstyle(result.output)
+    data = tomllib.loads((tmp_path / "pyproject.toml").read_text())
+    assert "psoul" in data["tool"]
+    # Discovery still prefers psoul.toml
+    result = runner.invoke(cli, ["config"])
+    assert result.exit_code == 0
+    assert "launch.mode = 'attached'" in click.unstyle(result.output)
 
 
 def test_doctor_ignores_broken_local_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
