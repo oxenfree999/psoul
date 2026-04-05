@@ -1,9 +1,12 @@
 """Tests for configuration schema, discovery, loading, and CLI commands."""
 
+import dataclasses
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
+import tomlkit.exceptions
 from typer.testing import CliRunner
 
 from psoul.cli.main import cli
@@ -16,10 +19,12 @@ from psoul.config import (
     PythonConfig,
     RetentionConfig,
     SessionConfig,
+    build_pyproject_psoul_table,
     default_config_dir,
     default_state_dir,
     find_config_file,
     generate_config,
+    inject_pyproject_config,
     load_config,
 )
 
@@ -223,6 +228,168 @@ def test_find_config_file_discovery_precedence(tmp_path: Path, monkeypatch: pyte
     result = find_config_file()
     assert result is not None
     assert result.name == "psoul.toml"
+
+
+def test_build_pyproject_psoul_table_has_all_sections() -> None:
+    table = build_pyproject_psoul_table()
+    section_names = {f.name for f in dataclasses.fields(PsoulConfig)}
+    assert set(table) == section_names
+
+
+def test_inject_empty_pyproject(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("")
+    inject_pyproject_config(pyproject)
+    data = tomllib.loads(pyproject.read_text())
+    assert "psoul" in data["tool"]
+    section_names = {f.name for f in dataclasses.fields(PsoulConfig)}
+    assert set(data["tool"]["psoul"]) == section_names
+
+
+def test_inject_preserves_existing_tool_sections(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "myapp"\n\n'
+        "[tool.ruff]\n"
+        "line-length = 120\n\n"
+        "[tool.pytest.ini_options]\n"
+        'testpaths = ["tests"]\n'
+    )
+    inject_pyproject_config(pyproject)
+    data = tomllib.loads(pyproject.read_text())
+    assert data["project"]["name"] == "myapp"
+    assert data["tool"]["ruff"]["line-length"] == 120
+    assert data["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
+    assert "psoul" in data["tool"]
+
+
+def test_inject_preserves_inline_comments(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "# Project metadata\n"
+        "[project]\n"
+        'name = "myapp"  # the app name\n\n'
+        "# Ruff linter settings\n"
+        "[tool.ruff]\n"
+        "line-length = 120  # keep lines wide\n"
+    )
+    inject_pyproject_config(pyproject)
+    text = pyproject.read_text()
+    assert "# Project metadata" in text
+    assert "# the app name" in text
+    assert "# Ruff linter settings" in text
+    assert "# keep lines wide" in text
+    data = tomllib.loads(text)
+    assert data["tool"]["ruff"]["line-length"] == 120
+    assert "psoul" in data["tool"]
+
+
+def test_inject_preserves_crlf_line_endings(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    content = '[project]\r\nname = "myapp"\r\n\r\n[tool.ruff]\r\nline-length = 120\r\n'
+    pyproject.write_bytes(content.encode())
+    inject_pyproject_config(pyproject)
+    raw = pyproject.read_bytes()
+    lf_only = raw.count(b"\n") - raw.count(b"\r\n")
+    assert lf_only == 0, f"found {lf_only} bare LF bytes in CRLF file"
+    data = tomllib.loads(raw.decode())
+    assert "psoul" in data["tool"]
+    assert data["tool"]["ruff"]["line-length"] == 120
+
+
+def test_inject_no_trailing_newline(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[tool.ruff]\nline-length = 120")  # no trailing \n
+    inject_pyproject_config(pyproject)
+    text = pyproject.read_text()
+    data = tomllib.loads(text)
+    assert data["tool"]["ruff"]["line-length"] == 120
+    assert "psoul" in data["tool"]
+    # Accepted limitation: no blank line before [tool.psoul] when input
+    # lacks a trailing newline.  The output is valid TOML but visually
+    # compressed at the section boundary.
+    assert "120\n[tool.psoul" in text
+
+
+def test_inject_mixed_line_endings_normalizes(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    # Mix of CRLF and LF — already broken input
+    content = '[project]\r\nname = "foo"\r\nversion = "1.0"\n\n[tool.ruff]\nline-length = 120\n'
+    pyproject.write_bytes(content.encode())
+    inject_pyproject_config(pyproject)
+    data = tomllib.loads(pyproject.read_text())
+    assert data["project"]["name"] == "foo"
+    assert "psoul" in data["tool"]
+    # Mixed endings normalize to platform default; the exact line ending
+    # is platform-dependent, but the result must be valid TOML.
+
+
+@pytest.mark.parametrize(
+    ("content", "exc_type", "match"),
+    [
+        pytest.param(
+            None,
+            FileNotFoundError,
+            "pyproject.toml",
+            id="missing_file",
+        ),
+        pytest.param(
+            "[tool\nbroken",
+            tomlkit.exceptions.TOMLKitError,
+            "Unexpected character",
+            id="invalid_toml",
+        ),
+        pytest.param(
+            '[tool.psoul.launch]\nmode = "headless"\n',
+            ValueError,
+            r"\[tool\.psoul\] already exists",
+            id="existing_tool_psoul",
+        ),
+        pytest.param(
+            'tool = { existing = "x" }\n',
+            TypeError,
+            r"\[tool\] is not a table",
+            id="tool_inline_table",
+        ),
+        pytest.param(
+            "tool = 1\n",
+            TypeError,
+            r"\[tool\] is not a table",
+            id="tool_scalar",
+        ),
+        pytest.param(
+            "tool = [1, 2]\n",
+            TypeError,
+            r"\[tool\] is not a table",
+            id="tool_array",
+        ),
+    ],
+)
+def test_inject_pyproject_config_errors(
+    tmp_path: Path,
+    content: str | None,
+    exc_type: type[Exception],
+    match: str,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    if content is not None:
+        pyproject.write_text(content)
+    with pytest.raises(exc_type, match=match):
+        inject_pyproject_config(pyproject)
+
+
+def test_inject_read_only_file_raises(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    original = '[project]\nname = "foo"\n'
+    pyproject.write_text(original)
+    pyproject.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            inject_pyproject_config(pyproject)
+        assert pyproject.read_text() == original
+        assert list(tmp_path.glob("*.toml.tmp")) == []
+    finally:
+        pyproject.chmod(0o644)
 
 
 runner = CliRunner()
