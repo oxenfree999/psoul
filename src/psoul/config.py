@@ -1,15 +1,23 @@
 """Configuration schema, platform directory resolution, and config generation."""
 
+import contextlib
 import dataclasses
+import os
+import re
 import sys
+import tempfile
 import tomllib
 import types
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import get_args, get_origin, get_type_hints
 
+import tomlkit
 from platformdirs import PlatformDirs
 from platformdirs.unix import Unix
+from tomlkit.items import Table
+from tomlkit.toml_file import TOMLFile
 
 from psoul.duration import parse_duration
 
@@ -301,23 +309,139 @@ def _format_toml_value(value: object) -> str:
     return str(value)
 
 
+def _detect_line_ending(content: str) -> str:
+    r"""Detect the line-ending style of *content*.
+
+    Returns ``"\r\n"`` if every newline is a Windows-style CRLF,
+    ``"\n"`` if every newline is Unix-style LF, or ``os.linesep``
+    when the content has no newlines or mixed endings.
+    """
+    num_lf = content.count("\n")
+    if num_lf == 0:
+        return os.linesep
+    num_crlf = content.count("\r\n")
+    if num_crlf == num_lf:
+        return "\r\n"
+    if num_crlf == 0:
+        return "\n"
+    return os.linesep
+
+
+def _apply_line_ending(content: str, linesep: str) -> str:
+    r"""Convert *content* (assumed ``"\n"``-normalized) to use *linesep*."""
+    if linesep == "\n":
+        return content.replace("\r\n", "\n")
+    if linesep == "\r\n":
+        return re.sub(r"(?<!\r)\n", "\r\n", content)
+    return content
+
+
+def _iter_config_comments() -> Iterator[tuple[str, list[str]]]:
+    """Yield ``(section_name, comment_lines)`` for each PsoulConfig section.
+
+    Each comment line is a formatted TOML key-value pair with its description,
+    e.g. ``'mode = "attached"  # attached (default) or headless'``.  Both
+    ``generate_config()`` and ``build_pyproject_psoul_table()`` consume this
+    iterator so the field-walking logic and example values live in one place.
+    """
+    defaults = PsoulConfig()
+    for section_field in dataclasses.fields(defaults):
+        section = getattr(defaults, section_field.name)
+        comments: list[str] = []
+        for f in dataclasses.fields(section):
+            desc = f.metadata.get("description", "")
+            value = f.metadata["example"] if getattr(section, f.name) is None else getattr(section, f.name)
+            line = f"{f.name} = {_format_toml_value(value)}"
+            if desc:
+                line += f"  # {desc}"
+            comments.append(line)
+        yield section_field.name, comments
+
+
 def generate_config() -> str:
     """Generate a commented psoul.toml by introspecting PsoulConfig fields.
 
     Every value is commented out so the file uses all defaults.
     Descriptions come from field metadata, not a separate data structure.
     """
-    defaults = PsoulConfig()
     lines = ["# psoul configuration", ""]
-
-    for section_field in dataclasses.fields(defaults):
-        section = getattr(defaults, section_field.name)
-        lines.append(f"[{section_field.name}]")
-        for f in dataclasses.fields(section):
-            desc = f.metadata.get("description", "")
-            value = f.metadata["example"] if getattr(section, f.name) is None else getattr(section, f.name)
-            comment = f"  # {desc}" if desc else ""
-            lines.append(f"# {f.name} = {_format_toml_value(value)}{comment}")
+    for section_name, comments in _iter_config_comments():
+        lines.append(f"[{section_name}]")
+        lines.extend(f"# {c}" for c in comments)
         lines.append("")
-
     return "\n".join(lines)
+
+
+def build_pyproject_psoul_table() -> Table:
+    """Build a ``[tool.psoul]`` table with commented-out default config.
+
+    Returns a tomlkit ``Table`` with one sub-table per config section,
+    each containing commented-out default values.  Uses the same field
+    iteration as ``generate_config()`` so examples stay in sync.
+    """
+    psoul = tomlkit.table()
+    for section_name, comments in _iter_config_comments():
+        sub = tomlkit.table()
+        for comment in comments:
+            sub.add(tomlkit.comment(comment))
+        psoul.add(section_name, sub)
+    return psoul
+
+
+def inject_pyproject_config(path: Path) -> None:
+    """Inject a ``[tool.psoul]`` section into an existing pyproject.toml.
+
+    Reads with ``TOMLFile`` for round-trip preservation of comments,
+    formatting, and ordering.  Writes atomically via a same-directory
+    temp file and ``os.replace()`` to prevent partial writes.  This does
+    **not** protect against concurrent edits between read and replace.
+
+    The target file itself must be writable.  This helper checks that
+    explicitly before the temp-file replace path, since ``os.replace()``
+    operates on the directory entry and would otherwise bypass a
+    read-only file mode in a writable directory.
+
+    Args:
+        path: Path to an existing pyproject.toml.
+
+    Raises:
+        FileNotFoundError: *path* does not exist.
+        tomlkit.exceptions.TOMLKitError: *path* contains invalid TOML.
+        TypeError: ``[tool]`` is not a TOML table (e.g. scalar, array,
+            or inline table — none can hold ``[tool.psoul]`` sub-tables).
+        ValueError: ``[tool.psoul]`` already exists in the document.
+        PermissionError: Target file or parent directory is not writable.
+        OSError: Other I/O failure.
+
+    """
+    with path.open(encoding="utf-8", newline="") as fh:
+        raw = fh.read()
+    linesep = _detect_line_ending(raw)
+
+    doc = TOMLFile(str(path)).read()
+    with path.open("r+b"):
+        pass
+
+    if "tool" not in doc:
+        doc["tool"] = {}
+    tool = doc["tool"]
+    if not isinstance(tool, Table):
+        msg = f"[tool] is not a table in {path}; cannot inject [tool.psoul] sub-tables"
+        raise TypeError(msg)
+    if "psoul" in tool:
+        msg = f"[tool.psoul] already exists in {path}"
+        raise ValueError(msg)
+    tool["psoul"] = build_pyproject_psoul_table()
+
+    content = _apply_line_ending(doc.as_string(), linesep)
+
+    fd, tmp_str = tempfile.mkstemp(dir=path.parent, suffix=".toml.tmp")
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        tmp.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
