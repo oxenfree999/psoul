@@ -68,6 +68,7 @@ def test_check_pid_os_kill_outcomes(
         if side_effect is not None:
             raise side_effect
 
+    monkeypatch.setattr("psoul.recovery.sys.platform", "linux")
     monkeypatch.setattr("psoul.recovery.os.kill", fake_kill)
     assert check_pid(42) is expected
 
