@@ -79,6 +79,7 @@ dependencies = [
     "pygments>=2.0",
     "rich>=13.0",
     "structlog>=24.1",
+    "tomlkit>=0.14",
     "typer>=0.12",
 ]
 
