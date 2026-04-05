@@ -19,6 +19,7 @@ from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, reso
 from psoul.config import PsoulConfig, find_config_file, generate_config, load_config
 from psoul.db import DB_NAME, open_db, resolve_state_dir
 from psoul.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
+from psoul.recovery import recover_sessions
 from psoul.session import LaunchMode, Session, SessionState
 from psoul.store import SessionStore
 from psoul.version import VERSION
@@ -154,6 +155,7 @@ def _launch_repl(ctx: typer.Context, name: str | None = None, tags: dict[str, st
     state_dir = resolve_state_dir(cfg.paths.state_dir)
     conn = open_db(state_dir)
     try:
+        recover_sessions(conn)
         if SessionStore(conn).get(session_id) is not None:
             print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
             raise typer.Exit(ExitCode.ERROR)
@@ -254,6 +256,7 @@ def run(
     state_dir = resolve_state_dir(cfg.paths.state_dir)
     conn = open_db(state_dir)
     try:
+        recover_sessions(conn)
         store = SessionStore(conn)
         if store.get(request.session_id) is not None:
             print(f"Error: session ID already exists: {request.session_id}", file=sys.stderr)
@@ -291,6 +294,7 @@ def ps(
     cfg = _load_resolved_config(gs.config_override)
     conn = open_db(resolve_state_dir(cfg.paths.state_dir))
     try:
+        recover_sessions(conn)
         sessions = SessionStore(conn).list(state=state, tags=parse_tags(tag))
     finally:
         conn.close()
@@ -312,6 +316,7 @@ def status(
     cfg = _load_resolved_config(gs.config_override)
     conn = open_db(resolve_state_dir(cfg.paths.state_dir))
     try:
+        recover_sessions(conn)
         session = _resolve_session_selector(SessionStore(conn), session_id)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

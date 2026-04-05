@@ -1,14 +1,18 @@
 """Tests for orphan detection and stale session recovery."""
 
+import json
+import os
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from psoul.cli.main import cli
 from psoul.db import open_db
 from psoul.recovery import (
     STARTING_GRACE_SECONDS,
@@ -20,6 +24,9 @@ from psoul.recovery import (
 from psoul.session import LaunchMode, Session, SessionState, TargetType
 from psoul.store import SessionStore
 from psoul.version import VERSION
+
+runner = CliRunner()
+DEAD_PID = 123456789
 
 
 @pytest.fixture
@@ -246,3 +253,80 @@ def test_concurrent_recovery_does_not_double_write(tmp_path: Path) -> None:
         assert state == SessionState.failed.value
     finally:
         verify_conn.close()
+
+
+def _store_orphan(state_dir: Path, name: str) -> None:
+    """Insert a running session with a dead supervisor PID."""
+    conn = open_db(state_dir)
+    store = SessionStore(conn)
+    _make_session(store, name, supervisor_pid=DEAD_PID)
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "extract_state"),
+    [
+        (["ps", "--json"], lambda out: json.loads(out)[0]["state"]),
+        (["status", "cli-orphan", "--json"], lambda out: json.loads(out)["state"]),
+    ],
+    ids=["ps", "status"],
+)
+def test_session_command_recovers_orphan(
+    cli_args: list[str],
+    extract_state: Callable[[str], str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    _store_orphan(tmp_path, "cli-orphan")
+    result = runner.invoke(cli, cli_args)
+    assert result.exit_code == 0
+    assert extract_state(result.output) == "failed"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_run_command_recovers_orphan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    _store_orphan(tmp_path, "run-orphan")
+    script = tmp_path / "noop.py"
+    script.write_text("pass")
+    result = runner.invoke(cli, ["run", "--headless", str(script)])
+    assert result.exit_code == 0
+    record = json.loads(result.output)
+    os.waitpid(record["supervisor_pid"], 0)
+    conn = open_db(tmp_path)
+    try:
+        row = conn.execute("SELECT state FROM sessions WHERE session_id = 'run-orphan'").fetchone()
+        assert row is not None
+        assert row[0] == SessionState.failed.value
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        ["--help"],
+        ["--version"],
+        ["doctor"],
+    ],
+    ids=["help", "version", "doctor"],
+)
+def test_non_session_commands_skip_recovery(
+    cli_args: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    _store_orphan(tmp_path, "should-survive")
+    result = runner.invoke(cli, cli_args)
+    assert result.exit_code == 0
+    conn = open_db(tmp_path)
+    try:
+        row = conn.execute("SELECT state FROM sessions WHERE session_id = 'should-survive'").fetchone()
+        assert row is not None
+        assert row[0] == SessionState.running.value
+    finally:
+        conn.close()
