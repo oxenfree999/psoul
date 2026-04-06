@@ -14,6 +14,110 @@ from psoul.session import (
     check_transition,
 )
 
+_FIELD_TYPES: dict[str, type] = {
+    "state": SessionState,
+    "launch_mode": LaunchMode,
+    "target_type": TargetType,
+    "target": str,
+    "tags": dict,
+    "helper_capabilities": dict,
+    "sandbox_policy": dict,
+    "target_args": list,
+    "config_sources": list,
+    "target_cwd": Path,
+    "python_path": Path,
+    "socket_path": Path,
+    "launch_time": datetime,
+    "control_acquired_at": datetime,
+    "python_version": str,
+    "uv_version": str,
+    "resolved_by": str,
+    "psoul_version": str,
+    "protocol_version": int,
+    "host": str,
+    "os": str,
+    "arch": str,
+    "git_sha": str,
+    "git_dirty": bool,
+    "lockfile_hash": str,
+    "script_hash": str,
+    "supervisor_pid": int,
+    "helper_pid": int,
+    "generation": int,
+    "control_epoch": int,
+    "controller_pid": int,
+    "sandbox_backend": str,
+}
+
+_JSON_FIELDS = frozenset({"tags", "helper_capabilities", "sandbox_policy", "target_args", "config_sources"})
+
+_COLUMNS = (
+    "tags",
+    "state",
+    "launch_mode",
+    "launch_time",
+    "target_type",
+    "target",
+    "target_args",
+    "target_cwd",
+    "python_version",
+    "python_path",
+    "uv_version",
+    "resolved_by",
+    "psoul_version",
+    "protocol_version",
+    "host",
+    "os",
+    "arch",
+    "config_sources",
+    "git_sha",
+    "git_dirty",
+    "lockfile_hash",
+    "script_hash",
+    "supervisor_pid",
+    "socket_path",
+    "helper_pid",
+    "helper_capabilities",
+    "generation",
+    "control_epoch",
+    "controller_pid",
+    "control_acquired_at",
+    "sandbox_backend",
+    "sandbox_policy",
+)
+
+_INSERT_SQL = (
+    f"INSERT INTO sessions (session_id, {', '.join(_COLUMNS)}) "  # noqa: S608
+    f"VALUES (:session_id, {', '.join(f':{c}' for c in _COLUMNS)})"
+)
+
+_ALL_FIELDS = frozenset(_COLUMNS) | {"session_id"}
+_IMMUTABLE_FIELDS = frozenset(
+    {
+        "session_id",
+        "launch_time",
+        "launch_mode",
+        "psoul_version",
+        "target_type",
+        "target",
+        "target_args",
+        "target_cwd",
+        "python_version",
+        "python_path",
+        "uv_version",
+        "resolved_by",
+        "protocol_version",
+        "host",
+        "os",
+        "arch",
+        "config_sources",
+        "git_sha",
+        "git_dirty",
+        "lockfile_hash",
+        "script_hash",
+    }
+)
+
 
 def _serialize(session: Session) -> dict[str, object]:
     """Convert a Session to a dict of SQLite-compatible values."""
@@ -53,44 +157,6 @@ def _serialize(session: Session) -> dict[str, object]:
         "sandbox_policy": session.sandbox_policy,
     }
     return {key: _serialize_value(key, value) for key, value in raw.items()}
-
-
-_FIELD_TYPES: dict[str, type] = {
-    "state": SessionState,
-    "launch_mode": LaunchMode,
-    "target_type": TargetType,
-    "target": str,
-    "tags": dict,
-    "helper_capabilities": dict,
-    "sandbox_policy": dict,
-    "target_args": list,
-    "config_sources": list,
-    "target_cwd": Path,
-    "python_path": Path,
-    "socket_path": Path,
-    "launch_time": datetime,
-    "control_acquired_at": datetime,
-    "python_version": str,
-    "uv_version": str,
-    "resolved_by": str,
-    "psoul_version": str,
-    "protocol_version": int,
-    "host": str,
-    "os": str,
-    "arch": str,
-    "git_sha": str,
-    "git_dirty": bool,
-    "lockfile_hash": str,
-    "script_hash": str,
-    "supervisor_pid": int,
-    "helper_pid": int,
-    "generation": int,
-    "control_epoch": int,
-    "controller_pid": int,
-    "sandbox_backend": str,
-}
-
-_JSON_FIELDS = frozenset({"tags", "helper_capabilities", "sandbox_policy", "target_args", "config_sources"})
 
 
 def _validate_json_shape(key: str, value: object) -> None:
@@ -224,75 +290,6 @@ def _deserialize(row: sqlite3.Row) -> Session:
         sandbox_policy=_from_json(row["sandbox_policy"]),  # ty: ignore[invalid-argument-type]
         tags=_from_json(row["tags"]),  # ty: ignore[invalid-argument-type]
     )
-
-
-_COLUMNS = (
-    "tags",
-    "state",
-    "launch_mode",
-    "launch_time",
-    "target_type",
-    "target",
-    "target_args",
-    "target_cwd",
-    "python_version",
-    "python_path",
-    "uv_version",
-    "resolved_by",
-    "psoul_version",
-    "protocol_version",
-    "host",
-    "os",
-    "arch",
-    "config_sources",
-    "git_sha",
-    "git_dirty",
-    "lockfile_hash",
-    "script_hash",
-    "supervisor_pid",
-    "socket_path",
-    "helper_pid",
-    "helper_capabilities",
-    "generation",
-    "control_epoch",
-    "controller_pid",
-    "control_acquired_at",
-    "sandbox_backend",
-    "sandbox_policy",
-)
-
-_INSERT_SQL = (
-    f"INSERT INTO sessions (session_id, {', '.join(_COLUMNS)}) "  # noqa: S608
-    f"VALUES (:session_id, {', '.join(f':{c}' for c in _COLUMNS)})"
-)
-
-
-_ALL_FIELDS = frozenset(_COLUMNS) | {"session_id"}
-_IMMUTABLE_FIELDS = frozenset(
-    {
-        "session_id",
-        "launch_time",
-        "launch_mode",
-        "psoul_version",
-        "target_type",
-        "target",
-        "target_args",
-        "target_cwd",
-        "python_version",
-        "python_path",
-        "uv_version",
-        "resolved_by",
-        "protocol_version",
-        "host",
-        "os",
-        "arch",
-        "config_sources",
-        "git_sha",
-        "git_dirty",
-        "lockfile_hash",
-        "script_hash",
-    }
-)
 
 
 class SessionStore:

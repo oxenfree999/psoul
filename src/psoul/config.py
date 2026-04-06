@@ -23,6 +23,8 @@ from psoul.duration import parse_duration
 
 APP_NAME = "psoul"
 
+_DIRS = Unix(APP_NAME) if sys.platform == "darwin" else PlatformDirs(APP_NAME)
+
 
 def _unwrap_optional(tp: type) -> tuple[type, bool]:
     """Unwrap ``X | None`` to ``(X, True)``.  Non-optional types return ``(tp, False)``."""
@@ -85,9 +87,6 @@ def _normalize_section(section_name: str, section_cls: type, raw: dict) -> dict:
         key: _coerce_field(section_name, key, val, hints[key], duration=fields[key].metadata.get("duration", False))
         for key, val in raw.items()
     }
-
-
-_DIRS = Unix(APP_NAME) if sys.platform == "darwin" else PlatformDirs(APP_NAME)
 
 
 def default_config_dir() -> Path:
@@ -218,6 +217,17 @@ class PsoulConfig:
     retention: RetentionConfig = RetentionConfig()
 
 
+_SECTION_CLASSES: dict[str, type] = {
+    "paths": PathsConfig,
+    "python": PythonConfig,
+    "launch": LaunchConfig,
+    "process": ProcessConfig,
+    "session": SessionConfig,
+    "output": OutputConfig,
+    "retention": RetentionConfig,
+}
+
+
 def find_config_file(override: Path | None = None) -> Path | None:
     """Discover the config file to use, following precedence order.
 
@@ -259,17 +269,6 @@ def _extract_psoul_table(path: Path, data: dict) -> dict:
     if path.name == "pyproject.toml":
         return data.get("tool", {}).get("psoul", {})
     return data
-
-
-_SECTION_CLASSES: dict[str, type] = {
-    "paths": PathsConfig,
-    "python": PythonConfig,
-    "launch": LaunchConfig,
-    "process": ProcessConfig,
-    "session": SessionConfig,
-    "output": OutputConfig,
-    "retention": RetentionConfig,
-}
 
 
 def load_config(path: Path | None = None) -> PsoulConfig:

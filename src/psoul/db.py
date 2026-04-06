@@ -9,6 +9,8 @@ from psoul.config import default_state_dir
 SCHEMA_VERSION = 1
 DB_NAME = "psoul.db"
 
+_MIGRATIONS: dict[int, collections.abc.Callable[[sqlite3.Connection], None]] = {}
+
 
 def resolve_state_dir(config_state_dir: Path | None = None) -> Path:
     """Return the state directory, creating it if needed.
@@ -206,9 +208,6 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_profiling_active
             ON profiling_state(session_id, generation, mode);
     """)
-
-
-_MIGRATIONS: dict[int, collections.abc.Callable[[sqlite3.Connection], None]] = {}
 
 
 def _run_migrations(conn: sqlite3.Connection, from_version: int) -> None:
