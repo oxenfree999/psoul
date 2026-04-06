@@ -50,7 +50,7 @@ class DefaultRunGroup(TyperGroup):
 cli = typer.Typer(
     name="psoul",
     cls=DefaultRunGroup,
-    help="A CLI and TUI Python session supervisor with batteries included.",
+    help="A CLI-first foundation for managed Python sessions.",
     invoke_without_command=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )

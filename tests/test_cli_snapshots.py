@@ -24,7 +24,7 @@ def test_main_help() -> None:
                                                                                 \n\
  Usage: psoul [OPTIONS] COMMAND [ARGS]...                                       \n\
                                                                                 \n\
- A CLI and TUI Python session supervisor with batteries included.               \n\
+ A CLI-first foundation for managed Python sessions.                            \n\
                                                                                 \n\
 ╭─ Options ────────────────────────────────────────────────────────────────────╮
 │ --verbose             -v      INTEGER              Increase output detail    │

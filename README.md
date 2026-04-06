@@ -1,6 +1,6 @@
 # psoul
 
-A CLI and TUI Python session supervisor with batteries included.
+A CLI-first foundation for managed Python sessions.
 
 > **v0.0.x — early development.** psoul is public from the first commit
 > but the API, CLI surface, and event schema are unstable. Breaking changes

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "psoul"
 version = "0.0.1"
-description = "A CLI and TUI Python session supervisor with batteries included."
+description = "A CLI-first foundation for managed Python sessions."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
