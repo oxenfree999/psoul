@@ -90,12 +90,22 @@ def _normalize_section(section_name: str, section_cls: type, raw: dict) -> dict:
 
 
 def default_config_dir() -> Path:
-    """Return the user config directory for psoul (~/.config/psoul on Unix)."""
+    """Return the user config directory for psoul (~/.config/psoul on Unix).
+
+    Returns:
+        Path: Platform-appropriate config directory.
+
+    """
     return _DIRS.user_config_path
 
 
 def default_state_dir() -> Path:
-    """Return the user state directory for psoul (~/.local/state/psoul on Unix)."""
+    """Return the user state directory for psoul (~/.local/state/psoul on Unix).
+
+    Returns:
+        Path: Platform-appropriate state directory.
+
+    """
     return _DIRS.user_state_path
 
 
@@ -231,9 +241,20 @@ _SECTION_CLASSES: dict[str, type] = {
 def find_config_file(override: Path | None = None) -> Path | None:
     """Discover the config file to use, following precedence order.
 
-    override (Path | None): explicit --config flag. Raises FileNotFoundError if set but missing.
+    Precedence: explicit *override* path, then ``psoul.toml`` in the
+    current directory, then ``pyproject.toml`` (if it contains
+    ``[tool.psoul]``), then ``~/.config/psoul/config.toml``.
 
-    Returns the first existing config file, or None if no config found.
+    Args:
+        override (Path | None): Explicit ``--config`` path.  When set, no
+            further search is performed.
+
+    Returns:
+        Path | None: First existing config file, or ``None`` if none found.
+
+    Raises:
+        FileNotFoundError: *override* is set but the file does not exist.
+
     """
     if override is not None:
         if not override.is_file():
@@ -274,7 +295,26 @@ def _extract_psoul_table(path: Path, data: dict) -> dict:
 def load_config(path: Path | None = None) -> PsoulConfig:
     """Load configuration from a TOML file into a PsoulConfig.
 
-    path (Path | None): file path from find_config_file(). None means all defaults.
+    When *path* is ``None`` (no config file found), all defaults apply.
+    For ``pyproject.toml`` files, reads from ``[tool.psoul]``.  Unknown
+    sections or keys raise ``ValueError``.
+
+    Args:
+        path (Path | None): Config file path from ``find_config_file()``,
+            or ``None`` for all defaults.
+
+    Returns:
+        PsoulConfig: Fully resolved configuration.
+
+    Raises:
+        ValueError: Unknown section or key in the config file.
+        TypeError: A value has the wrong TOML type for its field.
+
+    Example:
+        >>> cfg = load_config(find_config_file())
+        >>> cfg.process.stop_timeout
+        '10s'
+
     """
     if path is None:
         return PsoulConfig()
@@ -362,6 +402,10 @@ def generate_config() -> str:
 
     Every value is commented out so the file uses all defaults.
     Descriptions come from field metadata, not a separate data structure.
+
+    Returns:
+        str: Complete TOML file content ready to write to disk.
+
     """
     lines = ["# psoul configuration", ""]
     for section_name, comments in _iter_config_comments():
@@ -401,7 +445,7 @@ def inject_pyproject_config(path: Path) -> None:
     read-only file mode in a writable directory.
 
     Args:
-        path: Path to an existing pyproject.toml.
+        path (Path): Path to an existing pyproject.toml.
 
     Raises:
         FileNotFoundError: *path* does not exist.
@@ -411,6 +455,9 @@ def inject_pyproject_config(path: Path) -> None:
         ValueError: ``[tool.psoul]`` already exists in the document.
         PermissionError: Target file or parent directory is not writable.
         OSError: Other I/O failure.
+
+    Example:
+        >>> inject_pyproject_config(Path("pyproject.toml"))  # adds [tool.psoul]
 
     """
     with path.open(encoding="utf-8", newline="") as fh:

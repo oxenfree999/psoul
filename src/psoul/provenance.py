@@ -33,7 +33,15 @@ def _is_absolute_target(target: str) -> bool:
 
 
 def git_sha(cwd: Path) -> str | None:
-    """Return the full SHA of HEAD, or None if unavailable."""
+    """Return the full SHA of HEAD, or None if unavailable.
+
+    Args:
+        cwd (Path): Working directory for the git command.
+
+    Returns:
+        str | None: 40-character hex SHA, or ``None`` if git is missing or *cwd* is not a git repository.
+
+    """
     git = shutil.which("git")
     if git is None:
         return None
@@ -51,7 +59,15 @@ def git_sha(cwd: Path) -> str | None:
 
 
 def git_dirty(cwd: Path) -> bool | None:
-    """Return True if the working tree has changes including untracked files, or None if unavailable."""
+    """Return whether the working tree has uncommitted or untracked changes.
+
+    Args:
+        cwd (Path): Working directory for the git command.
+
+    Returns:
+        bool | None: ``True`` if dirty, ``False`` if clean, ``None`` if git is missing or *cwd* is not a git repository.
+
+    """
     git = shutil.which("git")
     if git is None:
         return None
@@ -69,7 +85,15 @@ def git_dirty(cwd: Path) -> bool | None:
 
 
 def file_hash(path: Path) -> str | None:
-    """Return ``sha256:<hex>`` digest of a file, or None if unreadable."""
+    """Return ``sha256:<hex>`` hash of a file, or ``None`` if unreadable.
+
+    Args:
+        path (Path): File to hash.
+
+    Returns:
+        str | None: Hash string prefixed with ``sha256:``, or ``None`` on ``OSError``.
+
+    """
     try:
         data = path.read_bytes()
     except OSError:
@@ -85,6 +109,13 @@ def find_lockfile_hash(cwd: Path) -> str | None:
     preferred.  ``requirements.txt`` is a last-resort fallback — it may be
     a ``pip freeze`` snapshot or a hand-written list, but either way a
     content change signals a dependency shift worth recording.
+
+    Args:
+        cwd (Path): Directory to search for lockfiles.
+
+    Returns:
+        str | None: ``sha256:<hex>`` hash of the first lockfile found, or ``None``.
+
     """
     for name in _LOCKFILE_CANDIDATES:
         result = file_hash(cwd / name)
@@ -94,10 +125,19 @@ def find_lockfile_hash(cwd: Path) -> str | None:
 
 
 def script_hash(target_type: TargetType, target: str | None, cwd: Path) -> str | None:
-    """Hash the script file if target is a real file, otherwise None.
+    """Hash the script file if target is a real file, otherwise ``None``.
 
-    Returns None for non-script targets, pseudo-targets like ``-c`` and
+    Returns ``None`` for non-script targets, pseudo-targets like ``-c`` and
     ``-`` (stdin), and files that don't exist on disk.
+
+    Args:
+        target_type (TargetType): Whether the target is a script, module, or repl.
+        target (str | None): Script path or module name.
+        cwd (Path): Working directory for resolving relative paths.
+
+    Returns:
+        str | None: ``sha256:<hex>`` hash, or ``None`` when not applicable.
+
     """
     if target_type != TargetType.script or target is None:
         return None
@@ -108,7 +148,19 @@ def script_hash(target_type: TargetType, target: str | None, cwd: Path) -> str |
 
 
 def gather(target_type: TargetType, target: str | None, cwd: Path) -> SessionProvenance:
-    """Collect all provenance fields as a dict compatible with Session kwargs."""
+    """Collect all provenance fields as a dict compatible with Session kwargs.
+
+    Captures git state, file hashes, and platform metadata at launch time.
+
+    Args:
+        target_type (TargetType): Whether the target is a script, module, or repl.
+        target (str | None): Script path or module name.
+        cwd (Path): Working directory for git and file lookups.
+
+    Returns:
+        SessionProvenance: Dict of provenance fields ready to unpack into ``Session()``.
+
+    """
     return {
         "git_sha": git_sha(cwd),
         "git_dirty": git_dirty(cwd),

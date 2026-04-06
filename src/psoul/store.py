@@ -293,7 +293,12 @@ def _deserialize(row: sqlite3.Row) -> Session:
 
 
 class SessionStore:
-    """CRUD operations for sessions against the SQLite sessions table."""
+    """CRUD operations for sessions against the SQLite sessions table.
+
+    Wraps an open ``sqlite3.Connection`` and handles serialization,
+    deserialization, state-transition validation, and result recording.
+    All writes commit immediately.
+    """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         """Wrap an existing database connection."""
@@ -301,25 +306,67 @@ class SessionStore:
         self.conn.row_factory = sqlite3.Row
 
     def create(self, session: Session) -> Session:
-        """Insert a session. Raises IntegrityError on duplicate session_id."""
+        """Insert a new session row and commit.
+
+        Args:
+            session (Session): Fully populated session to persist.
+
+        Returns:
+            Session: The same *session* object, confirming it was stored.
+
+        Raises:
+            sqlite3.IntegrityError: A session with this ID already exists.
+
+        Example:
+            >>> store.create(session)
+            Session(session_id='calm-otter-builds-kites', ...)
+
+        """
         row = _serialize(session)
         self.conn.execute(_INSERT_SQL, row)
         self.conn.commit()
         return session
 
     def get(self, session_id: str) -> Session | None:
-        """Look up a session by its ID. Returns None if not found."""
+        """Look up a session by its exact ID.
+
+        Args:
+            session_id (str): The session ID to look up.
+
+        Returns:
+            Session | None: The matching session, or ``None`` if not found.
+
+        Example:
+            >>> store.get("calm-otter-builds-kites")
+            Session(session_id='calm-otter-builds-kites', ...)
+            >>> store.get("nonexistent")  # returns None
+
+        """
         row = self.conn.execute("SELECT * FROM sessions WHERE session_id = ?", [session_id]).fetchone()
         if row is None:
             return None
         return _deserialize(row)
 
     def list(self, *, state: SessionState | None = None, tags: dict[str, str] | None = None) -> list[Session]:
-        """Return sessions ordered by launch_time descending, optionally filtered by state and tags.
+        """Return sessions ordered by launch_time descending.
 
-        Tag filtering uses AND semantics: a session matches when its tags
-        dict contains every key=value pair in *tags*. Sessions with extra
-        tags still match; sessions with no tags do not.
+        When *tags* is provided, only sessions whose tags contain **all**
+        of the given key=value pairs are returned.
+
+        Args:
+            state (SessionState | None): Only return sessions in this state,
+                or ``None`` for all states.
+            tags (dict[str, str] | None): Only return sessions matching all
+                of these tags, or ``None`` to skip tag filtering.
+
+        Returns:
+            list[Session]: Matching sessions, newest first.
+
+        Examples:
+            >>> store.list()  # all sessions
+            >>> store.list(state=SessionState.running)
+            >>> store.list(tags={"env": "dev"})
+
         """
         if state is not None:
             rows = self.conn.execute(
@@ -337,10 +384,25 @@ class SessionStore:
     def update(self, session_id: str, **fields: object) -> Session:
         """Update mutable fields on an existing session.
 
-        State changes are validated against the transition map.
-        Domain types (Path, datetime, etc.) are serialized automatically.
-        Raises KeyError if the session does not exist.
-        Raises ValueError for empty updates, unknown fields, or immutable fields.
+        State changes are validated against the lifecycle transition map.
+        Domain types like ``Path`` and ``datetime`` are serialized automatically.
+
+        Args:
+            session_id (str): Session to update.
+            **fields: Field names and new values.
+
+        Returns:
+            Session: The updated session as freshly read from the database.
+
+        Raises:
+            KeyError: Session does not exist.
+            ValueError: No fields given, unknown field name, or immutable
+                field included.
+
+        Example:
+            >>> store.update("calm-otter-builds-kites", state=SessionState.running)
+            Session(session_id='calm-otter-builds-kites', state=<SessionState.running: 'running'>, ...)
+
         """
         if not fields:
             msg = "update requires at least one field"
@@ -381,7 +443,28 @@ class SessionStore:
         end_time: datetime,
         duration_seconds: float,
     ) -> None:
-        """Insert a result row for the session's current generation."""
+        """Insert a result row for the session's current generation.
+
+        Args:
+            session_id (str): Session this result belongs to.
+            outcome (str): How the session ended, e.g. ``"exited"`` or ``"failed"``.
+            exit_code (int | None): Process exit code, or ``None`` for REPL sessions.
+            end_time (datetime): When the session finished.
+            duration_seconds (float): Wall-clock duration of the session.
+
+        Raises:
+            KeyError: Session does not exist.
+
+        Example:
+            >>> store.record_result(
+            ...     "calm-otter-builds-kites",
+            ...     outcome="exited",
+            ...     exit_code=0,
+            ...     end_time=datetime.now(UTC),
+            ...     duration_seconds=12.5,
+            ... )
+
+        """
         session = self.get(session_id)
         if session is None:
             msg = f"session not found: {session_id}"

@@ -35,6 +35,13 @@ def check_pid(pid: int) -> ProcessStatus:
     has recycled the PID to an unrelated process.  A stronger guard
     (PID + birth time) would eliminate false positives but requires
     platform-specific identity checks not implemented here.
+
+    Args:
+        pid (int): Process ID to check.
+
+    Returns:
+        ProcessStatus: ``alive``, ``dead``, or ``unknown``.
+
     """
     if pid <= 0:
         return ProcessStatus.unknown
@@ -137,7 +144,12 @@ def recover_sessions(conn: sqlite3.Connection) -> list[str]:
     no longer present and starting sessions past the grace period.
     Uses guarded SQL so concurrent callers cannot double-recover.
 
-    Returns the session IDs recovered by this call.
+    Args:
+        conn (sqlite3.Connection): Open database connection with the psoul schema.
+
+    Returns:
+        list[str]: Session IDs recovered by this call.
+
     """
     now = datetime.now(UTC)
     recovered: list[str] = []

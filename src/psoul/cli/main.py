@@ -57,6 +57,7 @@ cli = typer.Typer(
 
 
 def _load_resolved_config(config_override: Path | None) -> PsoulConfig:
+    """Find and load config, exiting on error."""
     try:
         config_file = find_config_file(config_override)
         return load_config(config_file)
@@ -66,12 +67,14 @@ def _load_resolved_config(config_override: Path | None) -> PsoulConfig:
 
 
 def _version_callback(value: bool) -> None:
+    """Print the version and exit when ``--version`` is passed."""
     if value:
         print(f"psoul {VERSION}")
         raise typer.Exit(ExitCode.SUCCESS)
 
 
 def _resolve_session_selector(store: SessionStore, selector: str) -> Session:
+    """Look up a session by exact ID or unique prefix."""
     session = store.get(selector)
     if session is not None:
         return session
@@ -87,14 +90,28 @@ def _resolve_session_selector(store: SessionStore, selector: str) -> Session:
 
 
 def parse_tags(raw: list[str] | None) -> dict[str, str] | None:
-    """Parse --tag key=value CLI arguments into a tag dict.
+    """Parse ``--tag key=value`` CLI arguments into a tag dict.
 
-    Returns None when *raw* is None or empty.  Splits each item on the
-    first ``=`` so values may contain additional ``=`` characters.  Keys
-    and values are stripped of surrounding whitespace.  Empty values
-    (``key=``) are allowed; missing ``=`` or an empty key (after
-    stripping) are rejected with ``typer.BadParameter``.  Duplicate keys
-    use last-wins semantics (natural dict assignment order).
+    Each string is split on the first ``=``.  Duplicate keys keep the
+    last value.
+
+    Args:
+        raw (list[str] | None): Raw ``--tag`` values from Typer, or ``None``.
+
+    Returns:
+        dict[str, str] | None: Parsed tags, or ``None`` when *raw* is ``None``
+            or empty.
+
+    Raises:
+        typer.BadParameter: A tag is missing ``=`` or has an empty key.
+
+    Examples:
+        >>> parse_tags(["env=dev", "team=platform"])
+        {'env': 'dev', 'team': 'platform'}
+        >>> parse_tags(["key=a=b"])  # value can contain '='
+        {'key': 'a=b'}
+        >>> parse_tags(None)  # returns None
+
     """
     if not raw:
         return None
