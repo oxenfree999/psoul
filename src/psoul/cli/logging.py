@@ -23,7 +23,15 @@ _VERBOSE_DEBUG = 2
 def resolve_log_level(verbose: int, quiet: bool) -> int:
     """Return the effective log level.
 
-    Precedence: CLI flags (-v/-q) → PSOUL_LOG env var → WARNING default.
+    Precedence: ``-q`` → ``-v``/``-vv`` → ``PSOUL_LOG`` env var → WARNING.
+
+    Args:
+        verbose (int): Count of ``-v`` flags (0, 1, or 2+).
+        quiet (bool): Whether ``-q`` was passed.
+
+    Returns:
+        int: A standard ``logging`` log level.
+
     """
     if quiet:
         return logging.ERROR
@@ -36,7 +44,16 @@ def resolve_log_level(verbose: int, quiet: bool) -> int:
 
 
 def configure_logging(level: int, output_format: OutputFormat) -> None:
-    """Configure structlog for psoul's diagnostic output."""
+    """Configure structlog for psoul's diagnostic output.
+
+    All diagnostic logs go to stderr.  Uses ``ConsoleRenderer`` for text
+    and ``JSONRenderer`` for JSON output.
+
+    Args:
+        level (int): Log level from ``resolve_log_level``.
+        output_format (OutputFormat): Controls which renderer is used.
+
+    """
     renderer = (
         structlog.processors.JSONRenderer() if output_format is OutputFormat.json else structlog.dev.ConsoleRenderer()
     )

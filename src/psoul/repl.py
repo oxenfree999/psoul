@@ -50,14 +50,22 @@ class ReplEngine:
     def is_complete(self, source: str) -> bool | None:
         """Check whether source is a complete Python statement.
 
-        Returns True if the source compiles successfully (ready to execute),
-        False if incomplete (needs more input lines), or None if the source
+        Returns ``True`` if the source compiles successfully (ready to execute),
+        ``False`` if incomplete (needs more input lines), or ``None`` if the source
         has a definite syntax error.
 
-        Uses codeop.CommandCompiler which handles incomplete-input detection
-        without brittle SyntaxError message matching.  On Python 3.13+ it
-        uses PyCF_ALLOW_INCOMPLETE_INPUT; on 3.12 it uses the stdlib's
+        Uses ``codeop.CommandCompiler`` which handles incomplete-input detection
+        without brittle ``SyntaxError`` message matching.  On Python 3.13+ it
+        uses ``PyCF_ALLOW_INCOMPLETE_INPUT``; on 3.12 it uses the stdlib's
         repr-comparison fallback.
+
+        Args:
+            source (str): Python source code to check.
+
+        Returns:
+            bool | None: ``True`` (complete), ``False`` (incomplete), or
+                ``None`` (syntax error).
+
         """
         try:
             code = self._compiler(source, "<input>", "single")
@@ -68,10 +76,15 @@ class ReplEngine:
     def execute(self, source: str) -> ExecResult:
         """Execute source in the REPL namespace and return the result.
 
-        :commands are dispatched before eval/exec.  For Python code,
-        eval mode is attempted first so expression results are captured.
-        The exec fallback lives outside the except block so that
-        sys.exc_info() reports the correct error if exec itself raises.
+        Dispatches ``:commands`` first, then tries eval (to capture a
+        return value), falling back to exec for statements.
+
+        Args:
+            source (str): Python source code or a ``:command`` to execute.
+
+        Returns:
+            ExecResult: Outcome containing the value, exception, output, or quit signal.
+
         """
         stripped = source.strip()
         if stripped.startswith(":"):

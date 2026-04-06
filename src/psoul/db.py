@@ -9,11 +9,21 @@ from psoul.config import default_state_dir
 SCHEMA_VERSION = 1
 DB_NAME = "psoul.db"
 
+_MIGRATIONS: dict[int, collections.abc.Callable[[sqlite3.Connection], None]] = {}
+
 
 def resolve_state_dir(config_state_dir: Path | None = None) -> Path:
     """Return the state directory, creating it if needed.
 
-    Uses the config override if set, otherwise the platform default.
+    Uses the config override when set, falling back to the platform default.
+
+    Args:
+        config_state_dir (Path | None): Explicit directory from config, or
+            ``None`` to use the platform default.
+
+    Returns:
+        Path: Resolved state directory (guaranteed to exist).
+
     """
     state_dir = config_state_dir if config_state_dir is not None else default_state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -208,9 +218,6 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     """)
 
 
-_MIGRATIONS: dict[int, collections.abc.Callable[[sqlite3.Connection], None]] = {}
-
-
 def _run_migrations(conn: sqlite3.Connection, from_version: int) -> None:
     """Apply sequential migrations from from_version to SCHEMA_VERSION."""
     conn.execute("BEGIN")
@@ -242,7 +249,22 @@ def _schema_exists(conn: sqlite3.Connection) -> bool:
 
 
 def open_db(state_dir: Path) -> sqlite3.Connection:
-    """Open or create the psoul database with pragmas and schema applied."""
+    """Open or create the psoul database.
+
+    Configures the connection for safe concurrent access, creates the
+    schema on first use, and runs pending migrations on an existing
+    database.  The caller owns the returned connection and must close it.
+
+    Args:
+        state_dir (Path): Directory containing (or that will contain) ``psoul.db``.
+
+    Returns:
+        sqlite3.Connection: Ready-to-use connection with schema in place.
+
+    Raises:
+        RuntimeError: Database schema is newer than this psoul version.
+
+    """
     conn = sqlite3.connect(state_dir / DB_NAME)
     try:
         _apply_pragmas(conn)

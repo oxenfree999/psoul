@@ -256,7 +256,18 @@ def _repl_key_bindings(engine: ReplEngine, completer: PythonCompleter) -> KeyBin
 
 
 def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path, tags: dict[str, str] | None = None) -> None:
-    """Run an interactive REPL session with prompt_toolkit."""
+    """Run an interactive REPL session with prompt_toolkit.
+
+    Creates the session, starts the engine, and enters the prompt loop.
+    Records the result and finalizes the session state on exit.
+
+    Args:
+        session_id (str): ID for the new session.
+        conn (sqlite3.Connection): Open database connection.
+        db_path (Path): Path to the database file (used for history).
+        tags (dict[str, str] | None): Session tags, or ``None``.
+
+    """
     store = SessionStore(conn)
     provenance = gather(TargetType.repl, None, Path.cwd())
     session = Session(

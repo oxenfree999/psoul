@@ -1,3 +1,5 @@
+"""Session launch: target parsing, request building, and process lifecycle."""
+
 import os
 import subprocess
 import sys
@@ -35,7 +37,22 @@ class LaunchTarget:
 
 
 def parse_launch_target(*, target: str | None, module: str | None, extra_args: Sequence[str]) -> LaunchTarget:
-    """Build a LaunchTarget from mutually exclusive CLI inputs."""
+    """Build a LaunchTarget from mutually exclusive CLI inputs.
+
+    Exactly one of *target* or *module* must be provided.
+
+    Args:
+        target (str | None): Script path.
+        module (str | None): Module name for ``-m`` invocation.
+        extra_args (Sequence[str]): Additional arguments passed to the target.
+
+    Returns:
+        LaunchTarget: Validated target with its argument tuple.
+
+    Raises:
+        ValueError: Both or neither of *target* and *module* are set.
+
+    """
     if target is not None and module is not None:
         raise ValueError("choose either a script target or -m module")
     if module is not None:
@@ -46,7 +63,19 @@ def parse_launch_target(*, target: str | None, module: str | None, extra_args: S
 
 
 def resolve_session_id(name: str | None) -> str:
-    """Return a validated session ID from --name, or generate one."""
+    """Return a validated session ID from ``--name``, or generate one.
+
+    Args:
+        name (str | None): Explicit name from the CLI flag, or ``None``
+            to auto-generate a four-word ID.
+
+    Returns:
+        str: A valid session ID.
+
+    Raises:
+        ValueError: *name* is provided but fails validation.
+
+    """
     if name is not None:
         return validate_session_id(name)
     return generate_session_id()
@@ -72,7 +101,24 @@ def build_launch_request(
     headless: bool,
     tags: dict[str, str] | None,
 ) -> LaunchRequest:
-    """Assemble a frozen LaunchRequest from CLI inputs."""
+    """Assemble a frozen LaunchRequest from CLI inputs.
+
+    Resolves the session ID, parses the launch target, detects whether
+    stdin is a TTY (falling back to headless if not), and freezes the
+    tags mapping.
+
+    Args:
+        target (str | None): Script path.
+        module (str | None): Module name for ``-m`` invocation.
+        extra_args (Sequence[str]): Additional arguments for the target.
+        name (str | None): Explicit session ID, or ``None`` to auto-generate.
+        headless (bool): Force headless launch mode.
+        tags (dict[str, str] | None): Session tags from ``--tag`` flags.
+
+    Returns:
+        LaunchRequest: Frozen snapshot of everything needed to create a session.
+
+    """
     return LaunchRequest(
         session_id=resolve_session_id(name),
         launch_mode=LaunchMode.headless if headless or not sys.stdin.isatty() else LaunchMode.attached,
@@ -102,7 +148,23 @@ def _create_session(request: LaunchRequest, store: SessionStore) -> Session:
 
 
 def launch_headless(request: LaunchRequest, store: SessionStore, state_dir: Path) -> tuple[Session, int]:
-    """Fork a background supervisor and return the session in starting state."""
+    """Fork a background supervisor and return the session in starting state.
+
+    The forked child becomes the supervisor — it outlives the CLI
+    process and monitors the user's script until it exits.
+
+    Args:
+        request (LaunchRequest): Resolved target, session ID, and launch options.
+        store (SessionStore): Store for persisting the session.
+        state_dir (Path): State directory for the supervisor's database connection.
+
+    Returns:
+        tuple[Session, int]: The new session and the supervisor's PID.
+
+    Raises:
+        NotImplementedError: Platform does not support ``os.fork`` (Windows).
+
+    """
     if not hasattr(os, "fork"):
         msg = "headless mode requires Unix (macOS/Linux)"
         raise NotImplementedError(msg)
@@ -135,7 +197,18 @@ def _supervise(request: LaunchRequest, state_dir: Path) -> None:
 
 
 def launch_attached(request: LaunchRequest, store: SessionStore) -> Session:
-    """Spawn a process with inherited stdio and wait for it to exit."""
+    """Spawn a process with inherited stdio and wait for it to exit.
+
+    The CLI process itself acts as the supervisor in attached mode.
+
+    Args:
+        request (LaunchRequest): Resolved target, session ID, and launch options.
+        store (SessionStore): Store for persisting the session.
+
+    Returns:
+        Session: The completed session after the process has exited.
+
+    """
     _create_session(request, store)
     proc = subprocess.Popen(request.target.as_cmd(), cwd=request.cwd)  # noqa: S603
     store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
@@ -143,7 +216,17 @@ def launch_attached(request: LaunchRequest, store: SessionStore) -> Session:
 
 
 def wait_for_exit(session_id: str, proc: subprocess.Popen[bytes], store: SessionStore) -> Session:
-    """Block until the process exits, then update the session to its final state."""
+    """Block until the process exits, then record the result and finalize the session.
+
+    Args:
+        session_id (str): Session that owns this process.
+        proc (subprocess.Popen[bytes]): The running process to wait on.
+        store (SessionStore): Store for recording the result and updating state.
+
+    Returns:
+        Session: The completed session after the process has exited.
+
+    """
     start = time.monotonic()
     final_session: Session | None = None
     try:

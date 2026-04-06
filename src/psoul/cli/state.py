@@ -31,7 +31,18 @@ class OutputFormat(StrEnum):
 
 
 def resolve_color(mode: ColorMode) -> bool:
-    """Decide whether to emit color based on --color choice and environment."""
+    """Decide whether to emit color based on ``--color`` flag and environment.
+
+    For ``auto`` mode, respects ``NO_COLOR``, ``FORCE_COLOR``, TTY detection,
+    and ``TERM=dumb``.
+
+    Args:
+        mode (ColorMode): The ``--color`` flag value.
+
+    Returns:
+        bool: ``True`` if color output should be enabled.
+
+    """
     if mode is ColorMode.always:
         return True
     if mode is ColorMode.never:

@@ -59,7 +59,17 @@ def _get_venv() -> str | None:
 
 
 def get_system_info() -> dict[str, Any]:
-    """Collect environment information."""
+    """Collect environment information for ``psoul doctor``.
+
+    Gathers platform details, Python interpreter path, psoul version,
+    virtual environment status, and availability of known Python tools.
+
+    Returns:
+        dict[str, Any]: Nested dict keyed by category: ``platform``,
+            ``python``, ``psoul``, ``tools``, ``venv``, ``interpreter``,
+            ``directory``.
+
+    """
     tools = {name: _get_tool_info(name) for name in KNOWN_TOOLS}
     return {
         "platform": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
@@ -73,7 +83,15 @@ def get_system_info() -> dict[str, Any]:
 
 
 def format_text(info: dict[str, Any]) -> str:
-    """Format system info as aligned text."""
+    """Format system info as column-aligned human-readable text.
+
+    Args:
+        info (dict[str, Any]): Output from ``get_system_info()``.
+
+    Returns:
+        str: Multi-line string with labels and values aligned.
+
+    """
     lines = []
 
     p = info["platform"]

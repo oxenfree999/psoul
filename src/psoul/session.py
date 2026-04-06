@@ -75,7 +75,16 @@ VALID_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
 
 
 def check_transition(from_state: SessionState, to_state: SessionState) -> None:
-    """Raise SessionError if the state transition is not allowed by the lifecycle."""
+    """Enforce the session lifecycle state machine.
+
+    Args:
+        from_state (SessionState): Current session state.
+        to_state (SessionState): Requested next state.
+
+    Raises:
+        SessionError: If *to_state* is not in ``VALID_TRANSITIONS[from_state]``.
+
+    """
     allowed = VALID_TRANSITIONS[from_state]
     if to_state not in allowed:
         msg = f"invalid state transition: {from_state} -> {to_state}"
@@ -92,7 +101,15 @@ def validate_session_id(session_id: str) -> str:
     core.md.  This keeps IDs unambiguous in case-insensitive filesystems,
     avoids shell-quoting surprises, and makes tab completion predictable.
 
-    Raises ValueError if the ID violates any rule.
+    Args:
+        session_id (str): The ID to validate.
+
+    Returns:
+        str: The unchanged *session_id* if valid.
+
+    Raises:
+        ValueError: If empty, exceeds 64 characters, or contains invalid characters.
+
     """
     if not session_id:
         msg = "session ID must not be empty"
@@ -108,7 +125,13 @@ def validate_session_id(session_id: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Session:
-    """Domain model for a psoul session."""
+    """Domain model for a psoul session.
+
+    An immutable snapshot of session state as stored in the database.
+    Created by the launch path and updated through ``SessionStore``.
+    Fields are grouped into identity, state, target, provenance,
+    runtime, and tags.  The ``session_id`` is validated on construction.
+    """
 
     # Identity
     session_id: str

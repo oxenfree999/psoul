@@ -279,7 +279,16 @@ VERBS: tuple[str, ...] = (
 
 
 def generate_session_id() -> str:
-    """Generate a random four-word session ID like ``quiet-otter-builds-kites``."""
+    """Generate a random four-word session ID like ``quiet-otter-builds-kites``.
+
+    Picks one word from each of the four 64-entry word lists using
+    ``secrets.choice`` for uniform randomness.  The result is validated
+    against ``validate_session_id`` before returning.
+
+    Returns:
+        str: A hyphen-joined four-word session ID.
+
+    """
     session_id = "-".join(
         (
             secrets.choice(ADJECTIVES),
