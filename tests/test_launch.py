@@ -407,15 +407,11 @@ def test_bare_file_with_global_verbose(tmp_path: Path, monkeypatch: pytest.Monke
     assert record["session_id"]
 
 
-@requires_fork
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
-def test_bare_nonexistent_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``psoul nonexistent.py`` routes to run, not silently to the REPL."""
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+def test_bare_nonexistent_file_errors_unknown_command(tmp_path: Path) -> None:
+    """``psoul nonexistent.py`` errors instead of silently routing to run."""
     result = runner.invoke(cli, [str(tmp_path / "nonexistent.py")])
-    assert result.exit_code == 0
-    record = json.loads(result.output)
-    assert record["session_id"]
+    assert result.exit_code == 2
+    assert "No such command" in click.unstyle(result.output)
 
 
 @requires_fork

@@ -27,22 +27,23 @@ from psoul.version import VERSION
 
 
 class DefaultRunGroup(TyperGroup):
-    """Route unrecognised top-level commands to ``run`` for file disambiguation.
+    """Route bare file arguments to ``run`` for shorthand invocation.
 
-    Allows ``psoul script.py`` as shorthand for ``psoul run script.py``.
-    Only non-option first arguments are rerouted; unknown flags (e.g.
-    ``--bad``) propagate the original ``UsageError`` so Click's normal
-    error handling applies.
+    Allows ``psoul script.py`` as shorthand for ``psoul run script.py``,
+    but only when *script.py* actually exists on disk. Unknown commands
+    that happen to look like filenames (``psoul psx``) and unknown flags
+    (``psoul --bad``) propagate the original ``UsageError`` so Click's
+    normal error handling applies.
     """
 
     def resolve_command(
         self, ctx: click.Context, args: list[str]
     ) -> tuple[str | None, click.Command | None, list[str]]:
-        """Resolve *args* to a command, falling back to ``run`` for bare files."""
+        """Resolve *args* to a command, routing existing files to ``run``."""
         try:
             return super().resolve_command(ctx, args)
         except click.UsageError:
-            if args and not args[0].startswith("-"):
+            if args and not args[0].startswith("-") and Path(args[0]).exists():
                 return super().resolve_command(ctx, ["run", *args])
             raise
 
