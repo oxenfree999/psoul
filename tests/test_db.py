@@ -217,3 +217,35 @@ def test_migration_rollback_on_failure(tmp_path: Path, monkeypatch: pytest.Monke
     version = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
     conn.close()
     assert version == "0"
+
+
+@pytest.mark.parametrize(
+    ("pre_init", "expect_wal_pragma"),
+    [
+        pytest.param(False, True, id="fresh-db-issues-wal-pragma"),
+        pytest.param(True, False, id="already-wal-skips-pragma"),
+    ],
+)
+def test_open_db_wal_pragma_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pre_init: bool,
+    expect_wal_pragma: bool,
+) -> None:
+    if pre_init:
+        open_db(tmp_path).close()  # establish WAL before the traced open
+
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(database: Path, *, timeout: float) -> sqlite3.Connection:
+        conn = real_connect(database, timeout=timeout)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr("psoul.db.sqlite3.connect", traced_connect)
+    open_db(tmp_path).close()
+
+    issued_wal = any("PRAGMA journal_mode = WAL" in s for s in statements)
+    assert issued_wal is expect_wal_pragma, statements
+    assert any(s.strip() == "PRAGMA journal_mode" for s in statements), statements

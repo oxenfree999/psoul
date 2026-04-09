@@ -1,5 +1,6 @@
 """Tests for global CLI flags."""
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -64,3 +65,35 @@ def test_help_shows_flags() -> None:
     output = typer.unstyle(result.output)
     for flag in ["--verbose", "--quiet", "--color", "--config", "--version"]:
         assert flag in output
+
+
+@pytest.mark.parametrize(
+    ("invocation", "needs_script"),
+    [
+        pytest.param([], False, id="bare-psoul"),
+        pytest.param(["run"], True, id="run"),
+        pytest.param(["ps"], False, id="ps"),
+        pytest.param(["status", "fake-id"], False, id="status"),
+    ],
+)
+def test_open_db_lock_translates_to_clean_cli_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation: list[str],
+    needs_script: bool,
+) -> None:
+    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    args = list(invocation)
+    if needs_script:
+        script = tmp_path / "noop.py"
+        script.write_text("pass")
+        args.append(str(script))
+
+    def raise_locked(_state_dir: Path) -> sqlite3.Connection:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("psoul.cli.main.open_db", raise_locked)
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 1
+    assert "database is busy or locked" in result.output
+    assert "Traceback" not in result.output
