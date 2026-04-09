@@ -67,6 +67,15 @@ def _load_resolved_config(config_override: Path | None) -> PsoulConfig:
         raise typer.Exit(ExitCode.ERROR) from exc
 
 
+def _open_db_or_exit(state_dir: Path) -> sqlite3.Connection:
+    """Open the database, translating OperationalError to a clean CLI error."""
+    try:
+        return open_db(state_dir)
+    except sqlite3.OperationalError as exc:
+        print(f"Error: database is busy or locked: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from exc
+
+
 def _version_callback(value: bool) -> None:
     """Print the version and exit when ``--version`` is passed."""
     if value:
@@ -172,7 +181,7 @@ def _launch_repl(ctx: typer.Context, name: str | None = None, tags: dict[str, st
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.USAGE) from exc
     state_dir = resolve_state_dir(cfg.paths.state_dir)
-    conn = open_db(state_dir)
+    conn = _open_db_or_exit(state_dir)
     try:
         recover_sessions(conn)
         if SessionStore(conn).get(session_id) is not None:
@@ -288,7 +297,7 @@ def run(
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.USAGE) from exc
     state_dir = resolve_state_dir(cfg.paths.state_dir)
-    conn = open_db(state_dir)
+    conn = _open_db_or_exit(state_dir)
     try:
         recover_sessions(conn)
         store = SessionStore(conn)
@@ -326,7 +335,7 @@ def ps(
     """List sessions."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    conn = open_db(resolve_state_dir(cfg.paths.state_dir))
+    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
     try:
         recover_sessions(conn)
         sessions = SessionStore(conn).list(state=state, tags=parse_tags(tag))
@@ -348,7 +357,7 @@ def status(
     """Show session detail."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    conn = open_db(resolve_state_dir(cfg.paths.state_dir))
+    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
     try:
         recover_sessions(conn)
         session = _resolve_session_selector(SessionStore(conn), session_id)

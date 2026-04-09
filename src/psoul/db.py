@@ -31,10 +31,16 @@ def resolve_state_dir(config_state_dir: Path | None = None) -> Path:
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
-    """Set WAL mode, foreign keys, busy timeout, and synchronous mode."""
-    conn.execute("PRAGMA journal_mode = WAL")
+    """Set journal mode, foreign keys, and synchronous mode.
+
+    WAL persists across reopens, so the journal-mode pragma is skipped
+    when the database is already in WAL — re-running it can contend on
+    a fresh database. Busy timeout is set in ``open_db`` via ``sqlite3.connect``.
+    """
+    current = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    if current.lower() != "wal":
+        conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA synchronous = NORMAL")
 
 
@@ -265,7 +271,7 @@ def open_db(state_dir: Path) -> sqlite3.Connection:
         RuntimeError: Database schema is newer than this psoul version.
 
     """
-    conn = sqlite3.connect(state_dir / DB_NAME)
+    conn = sqlite3.connect(state_dir / DB_NAME, timeout=5.0)
     try:
         _apply_pragmas(conn)
         if not _schema_exists(conn):
