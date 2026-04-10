@@ -38,12 +38,24 @@ def _mock_subprocess(result: object) -> Callable[..., object]:
         (git_sha, "/usr/bin/git", subprocess.CompletedProcess([], 0, stdout=FAKE_SHA + "\n"), FAKE_SHA),
         (git_sha, None, None, None),
         (git_sha, "/usr/bin/git", subprocess.CalledProcessError(128, "git"), None),
+        (git_sha, "/usr/bin/git", subprocess.TimeoutExpired("git", 5), None),
         (git_dirty, "/usr/bin/git", subprocess.CompletedProcess([], 0, stdout=""), False),
         (git_dirty, "/usr/bin/git", subprocess.CompletedProcess([], 0, stdout=" M dirty.py\n?? new.py\n"), True),
         (git_dirty, None, None, None),
         (git_dirty, "/usr/bin/git", subprocess.CalledProcessError(128, "git"), None),
+        (git_dirty, "/usr/bin/git", subprocess.TimeoutExpired("git", 5), None),
     ],
-    ids=["sha-ok", "sha-no-git", "sha-no-repo", "dirty-clean", "dirty-dirty", "dirty-no-git", "dirty-no-repo"],
+    ids=[
+        "sha-ok",
+        "sha-no-git",
+        "sha-no-repo",
+        "sha-timeout",
+        "dirty-clean",
+        "dirty-dirty",
+        "dirty-no-git",
+        "dirty-no-repo",
+        "dirty-timeout",
+    ],
 )
 def test_git_functions(
     tmp_path: Path,
@@ -57,6 +69,23 @@ def test_git_functions(
     if run_result is not None:
         monkeypatch.setattr("psoul.provenance.subprocess.run", _mock_subprocess(run_result))
     assert func(tmp_path) == expected
+
+
+def test_git_subprocess_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both git helpers pass timeout=5 to subprocess.run."""
+    captured: list[dict[str, object]] = []
+
+    def spy(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(kwargs)
+        return subprocess.CompletedProcess([], 0, stdout=FAKE_SHA + "\n")
+
+    monkeypatch.setattr("psoul.provenance.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("psoul.provenance.subprocess.run", spy)
+    git_sha(tmp_path)
+    git_dirty(tmp_path)
+    assert len(captured) == 2
+    assert captured[0]["timeout"] == 5  # git_sha
+    assert captured[1]["timeout"] == 5  # git_dirty
 
 
 _HELLO_HASH = f"sha256:{hashlib.sha256(b'hello world', usedforsecurity=False).hexdigest()}"
