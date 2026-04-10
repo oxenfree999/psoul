@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from psoul.session import (
+from psoul.core.session import (
     SESSION_ID_MAX_LENGTH,
     TERMINAL_STATES,
     VALID_TRANSITIONS,

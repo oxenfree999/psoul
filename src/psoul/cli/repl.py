@@ -26,10 +26,10 @@ from prompt_toolkit.validation import ValidationError, Validator
 from pygments.lexers import PythonLexer  # ty: ignore[unresolved-import]
 from rich.console import Console
 
-from psoul.provenance import gather
-from psoul.repl import ReplEngine
-from psoul.session import LaunchMode, Session, SessionState, TargetType
-from psoul.store import SessionStore
+from psoul.core.provenance import gather
+from psoul.core.repl import ReplEngine
+from psoul.core.session import LaunchMode, Session, SessionState, TargetType
+from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
 _ATTR_PATTERN = re.compile(r"([\w.]+)\.([\w]*)$")

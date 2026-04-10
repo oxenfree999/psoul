@@ -2,7 +2,7 @@
 
 import pytest
 
-from psoul.repl import ReplEngine
+from psoul.core.repl import ReplEngine
 
 
 @pytest.fixture

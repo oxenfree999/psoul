@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
-from psoul.session import (
+from psoul.core.session import (
     LaunchMode,
     Session,
     SessionState,

@@ -17,12 +17,12 @@ from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.logging import configure_logging, resolve_log_level
 from psoul.cli.repl import run_repl
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
-from psoul.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
-from psoul.db import DB_NAME, open_db, resolve_state_dir
-from psoul.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
-from psoul.recovery import recover_sessions
-from psoul.session import LaunchMode, Session, SessionState
-from psoul.store import SessionStore
+from psoul.core.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
+from psoul.core.db import DB_NAME, open_db, resolve_state_dir
+from psoul.core.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
+from psoul.core.recovery import recover_sessions
+from psoul.core.session import LaunchMode, Session, SessionState
+from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
 

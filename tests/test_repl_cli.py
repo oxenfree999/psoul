@@ -25,11 +25,11 @@ from psoul.cli.repl import (
     _repl_key_bindings,
     run_repl,
 )
-from psoul.db import open_db
-from psoul.provenance import SessionProvenance
-from psoul.repl import ReplEngine
-from psoul.session import LaunchMode, Session, SessionState, TargetType
-from psoul.store import SessionStore
+from psoul.core.db import open_db
+from psoul.core.provenance import SessionProvenance
+from psoul.core.repl import ReplEngine
+from psoul.core.session import LaunchMode, Session, SessionState, TargetType
+from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
 runner = CliRunner()

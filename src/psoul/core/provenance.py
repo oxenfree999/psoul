@@ -8,7 +8,7 @@ import sys
 from pathlib import Path, PureWindowsPath
 from typing import TypedDict
 
-from psoul.session import TargetType
+from psoul.core.session import TargetType
 
 _LOCKFILE_CANDIDATES = ("uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock", "requirements.txt")
 

@@ -2,8 +2,8 @@
 
 import pytest
 
-from psoul.names import ADJECTIVES, OBJECT_NOUNS, SUBJECT_NOUNS, VERBS, generate_session_id
-from psoul.session import validate_session_id
+from psoul.core.names import ADJECTIVES, OBJECT_NOUNS, SUBJECT_NOUNS, VERBS, generate_session_id
+from psoul.core.session import validate_session_id
 
 
 @pytest.mark.parametrize(
@@ -36,7 +36,7 @@ def test_deterministic_with_patched_choice(monkeypatch: pytest.MonkeyPatch) -> N
         calls.append(seq)
         return seq[0]
 
-    monkeypatch.setattr("psoul.names.secrets.choice", fake_choice)
+    monkeypatch.setattr("psoul.core.names.secrets.choice", fake_choice)
     session_id = generate_session_id()
     assert session_id == f"{ADJECTIVES[0]}-{SUBJECT_NOUNS[0]}-{VERBS[0]}-{OBJECT_NOUNS[0]}"
     assert len(calls) == 4

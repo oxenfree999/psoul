@@ -10,7 +10,7 @@ import tomlkit.exceptions
 from typer.testing import CliRunner
 
 from psoul.cli.main import cli
-from psoul.config import (
+from psoul.core.config import (
     _GENERATED_SECTIONS,
     LaunchConfig,
     OutputConfig,

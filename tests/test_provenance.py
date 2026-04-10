@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from psoul.provenance import (
+from psoul.core.provenance import (
     file_hash,
     find_lockfile_hash,
     gather,
@@ -16,7 +16,7 @@ from psoul.provenance import (
     git_sha,
     script_hash,
 )
-from psoul.session import TargetType
+from psoul.core.session import TargetType
 
 FAKE_SHA = "a" * 40
 
@@ -65,9 +65,9 @@ def test_git_functions(
     run_result: object,
     expected: object,
 ) -> None:
-    monkeypatch.setattr("psoul.provenance.shutil.which", lambda _: which_result)
+    monkeypatch.setattr("psoul.core.provenance.shutil.which", lambda _: which_result)
     if run_result is not None:
-        monkeypatch.setattr("psoul.provenance.subprocess.run", _mock_subprocess(run_result))
+        monkeypatch.setattr("psoul.core.provenance.subprocess.run", _mock_subprocess(run_result))
     assert func(tmp_path) == expected
 
 
@@ -79,8 +79,8 @@ def test_git_subprocess_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         captured.append(kwargs)
         return subprocess.CompletedProcess([], 0, stdout=FAKE_SHA + "\n")
 
-    monkeypatch.setattr("psoul.provenance.shutil.which", lambda _: "/usr/bin/git")
-    monkeypatch.setattr("psoul.provenance.subprocess.run", spy)
+    monkeypatch.setattr("psoul.core.provenance.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("psoul.core.provenance.subprocess.run", spy)
     git_sha(tmp_path)
     git_dirty(tmp_path)
     assert len(captured) == 2
@@ -167,7 +167,7 @@ def test_script_hash_preserves_windows_absolute_path(tmp_path: Path, monkeypatch
         seen.append(path)
         return "sha256:sunny-bunnies"
 
-    monkeypatch.setattr("psoul.provenance.file_hash", mock_file_hash)
+    monkeypatch.setattr("psoul.core.provenance.file_hash", mock_file_hash)
 
     result = script_hash(TargetType.script, r"C:\work\train.py", tmp_path)
 
@@ -176,17 +176,17 @@ def test_script_hash_preserves_windows_absolute_path(tmp_path: Path, monkeypatch
 
 
 def test_gather(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.provenance.shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("psoul.core.provenance.shutil.which", lambda _: "/usr/bin/git")
 
     def mock_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
         if "rev-parse" in cmd:
             return subprocess.CompletedProcess([], 0, stdout=FAKE_SHA + "\n")
         return subprocess.CompletedProcess([], 0, stdout=" M dirty.py\n")
 
-    monkeypatch.setattr("psoul.provenance.subprocess.run", mock_run)
-    monkeypatch.setattr("psoul.provenance.platform.python_version", lambda: "3.14.0")
-    monkeypatch.setattr("psoul.provenance.platform.node", lambda: "testhost")
-    monkeypatch.setattr("psoul.provenance.platform.machine", lambda: "aarch64")
+    monkeypatch.setattr("psoul.core.provenance.subprocess.run", mock_run)
+    monkeypatch.setattr("psoul.core.provenance.platform.python_version", lambda: "3.14.0")
+    monkeypatch.setattr("psoul.core.provenance.platform.node", lambda: "testhost")
+    monkeypatch.setattr("psoul.core.provenance.platform.machine", lambda: "aarch64")
     monkeypatch.setattr(sys, "platform", "linux")
 
     script = tmp_path / "train.py"

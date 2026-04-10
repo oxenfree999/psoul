@@ -13,16 +13,16 @@ import pytest
 from typer.testing import CliRunner
 
 from psoul.cli.main import cli
-from psoul.db import open_db
-from psoul.recovery import (
+from psoul.core.db import open_db
+from psoul.core.recovery import (
     STARTING_GRACE_SECONDS,
     ProcessStatus,
     _recover_session,
     check_pid,
     recover_sessions,
 )
-from psoul.session import LaunchMode, Session, SessionState, TargetType
-from psoul.store import SessionStore
+from psoul.core.session import LaunchMode, Session, SessionState, TargetType
+from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
 runner = CliRunner()
@@ -47,7 +47,7 @@ def test_check_pid_invalid_returns_unknown() -> None:
 
 
 def test_check_pid_windows_returns_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.recovery.sys.platform", "win32")
+    monkeypatch.setattr("psoul.core.recovery.sys.platform", "win32")
     assert check_pid(12345) is ProcessStatus.unknown
 
 
@@ -68,8 +68,8 @@ def test_check_pid_os_kill_outcomes(
         if side_effect is not None:
             raise side_effect
 
-    monkeypatch.setattr("psoul.recovery.sys.platform", "linux")
-    monkeypatch.setattr("psoul.recovery.os.kill", fake_kill)
+    monkeypatch.setattr("psoul.core.recovery.sys.platform", "linux")
+    monkeypatch.setattr("psoul.core.recovery.os.kill", fake_kill)
     assert check_pid(42) is expected
 
 
@@ -113,7 +113,7 @@ def test_dead_running_session_recovered(
     conn: sqlite3.Connection, store: SessionStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _make_session(store, "orphan-a", supervisor_pid=99999)
-    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    monkeypatch.setattr("psoul.core.recovery.check_pid", lambda pid: ProcessStatus.dead)
     recovered = recover_sessions(conn)
     assert recovered == ["orphan-a"]
     session = store.get("orphan-a")
@@ -141,7 +141,7 @@ def test_running_session_live_pid_left_alone(
     conn: sqlite3.Connection, store: SessionStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _make_session(store, "alive-sess")
-    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.alive)
+    monkeypatch.setattr("psoul.core.recovery.check_pid", lambda pid: ProcessStatus.alive)
     recovered = recover_sessions(conn)
     assert recovered == []
     session = store.get("alive-sess")
@@ -153,7 +153,7 @@ def test_running_session_unknown_pid_status_left_alone(
     conn: sqlite3.Connection, store: SessionStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _make_session(store, "unknown-sess")
-    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.unknown)
+    monkeypatch.setattr("psoul.core.recovery.check_pid", lambda pid: ProcessStatus.unknown)
     recovered = recover_sessions(conn)
     assert recovered == []
     session = store.get("unknown-sess")
@@ -210,7 +210,7 @@ def test_existing_result_row_finalizes_from_outcome(
         [outcome, datetime.now(UTC).isoformat()],
     )
     conn.commit()
-    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    monkeypatch.setattr("psoul.core.recovery.check_pid", lambda pid: ProcessStatus.dead)
     recovered = recover_sessions(conn)
     assert recovered == ["partial"]
     session = store.get("partial")
@@ -278,8 +278,8 @@ def test_session_command_recovers_orphan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.recovery.check_pid", lambda pid: ProcessStatus.dead)
     _store_orphan(tmp_path, "cli-orphan")
     result = runner.invoke(cli, cli_args)
     assert result.exit_code == 0
@@ -289,8 +289,8 @@ def test_session_command_recovers_orphan(
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_run_command_recovers_orphan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.recovery.check_pid", lambda pid: ProcessStatus.dead)
     _store_orphan(tmp_path, "run-orphan")
     script = tmp_path / "noop.py"
     script.write_text("pass")
@@ -319,8 +319,8 @@ def test_run_command_recovers_orphan(tmp_path: Path, monkeypatch: pytest.MonkeyP
 def test_non_session_commands_skip_recovery(
     cli_args: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
-    monkeypatch.setattr("psoul.recovery.check_pid", lambda pid: ProcessStatus.dead)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.recovery.check_pid", lambda pid: ProcessStatus.dead)
     _store_orphan(tmp_path, "should-survive")
     result = runner.invoke(cli, cli_args)
     assert result.exit_code == 0
