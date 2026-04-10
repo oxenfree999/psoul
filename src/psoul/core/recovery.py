@@ -6,7 +6,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from psoul.session import SessionState
+from psoul.core.session import SessionState
 
 STARTING_GRACE_SECONDS = 30
 

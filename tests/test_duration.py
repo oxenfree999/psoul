@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from psoul.duration import parse_duration
+from psoul.core.duration import parse_duration
 
 
 @pytest.mark.parametrize(

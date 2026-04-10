@@ -19,8 +19,8 @@ from platformdirs.unix import Unix
 from tomlkit.items import Table
 from tomlkit.toml_file import TOMLFile
 
-from psoul.duration import parse_duration
-from psoul.session import LaunchMode
+from psoul.core.duration import parse_duration
+from psoul.core.session import LaunchMode
 
 APP_NAME = "psoul"
 

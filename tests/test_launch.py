@@ -13,8 +13,8 @@ import pytest
 from typer.testing import CliRunner
 
 from psoul.cli.main import cli
-from psoul.db import open_db
-from psoul.launch import (
+from psoul.core.db import open_db
+from psoul.core.launch import (
     LaunchRequest,
     LaunchTarget,
     build_launch_request,
@@ -24,9 +24,9 @@ from psoul.launch import (
     resolve_session_id,
     wait_for_exit,
 )
-from psoul.provenance import SessionProvenance
-from psoul.session import LaunchMode, Session, SessionState, TargetType
-from psoul.store import SessionStore
+from psoul.core.provenance import SessionProvenance
+from psoul.core.session import LaunchMode, Session, SessionState, TargetType
+from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
 runner = CliRunner()
@@ -109,7 +109,7 @@ def test_as_cmd_uses_configured_python_path(target_type: TargetType, target: str
 
 
 def test_build_launch_request_freezes_tags(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("psoul.core.launch.sys.stdin.isatty", lambda: False)
     tags = {"env": "dev"}
     req = build_launch_request(
         target="x.py",
@@ -143,7 +143,7 @@ def test_build_launch_request_resolves_mode(
     default_mode: LaunchMode,
     expected: LaunchMode,
 ) -> None:
-    monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: isatty)
+    monkeypatch.setattr("psoul.core.launch.sys.stdin.isatty", lambda: isatty)
     req = build_launch_request(
         target="x.py",
         module=None,
@@ -158,7 +158,7 @@ def test_build_launch_request_resolves_mode(
 
 
 def test_build_launch_request_threads_python_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("psoul.core.launch.sys.stdin.isatty", lambda: True)
     req = build_launch_request(
         target="x.py",
         module=None,
@@ -248,7 +248,7 @@ def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: 
         calls.append(args)
         return fake_provenance
 
-    monkeypatch.setattr("psoul.launch.gather", fake_gather)
+    monkeypatch.setattr("psoul.core.launch.gather", fake_gather)
     req = _script_request("pass", launch_mode=LaunchMode.attached)
     final = launch_attached(req, store)
 
@@ -330,7 +330,7 @@ def test_wait_for_exit_records_result_when_wait_raises(store: SessionStore) -> N
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_headless_cli_prints_record_and_exits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     script = tmp_path / "slow.py"
     script.write_text("import time; time.sleep(5)")
     start = time.monotonic()
@@ -345,7 +345,7 @@ def test_headless_cli_prints_record_and_exits(tmp_path: Path, monkeypatch: pytes
 
 
 def test_duplicate_session_id_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     _store_session(tmp_path, "dup-test")
     script = tmp_path / "noop.py"
     script.write_text("pass")
@@ -355,9 +355,9 @@ def test_duplicate_session_id_rejected(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_headless_without_fork_prints_cli_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     if hasattr(os, "fork"):
-        monkeypatch.delattr("psoul.launch.os.fork")
+        monkeypatch.delattr("psoul.core.launch.os.fork")
     script = tmp_path / "noop.py"
     script.write_text("pass")
     result = runner.invoke(cli, ["run", "--headless", str(script)])
@@ -366,7 +366,7 @@ def test_headless_without_fork_prints_cli_error(tmp_path: Path, monkeypatch: pyt
 
 
 def test_ps_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     _store_session(tmp_path, "ps-test-a")
     _store_session(tmp_path, "ps-test-b")
     text_result = runner.invoke(cli, ["ps"])
@@ -379,7 +379,7 @@ def test_ps_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_status_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     _store_session(tmp_path, "status-test")
     text_result = runner.invoke(cli, ["status", "status-t"])
     assert text_result.exit_code == 0
@@ -390,14 +390,14 @@ def test_status_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_status_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     result = runner.invoke(cli, ["status", "nonexistent"])
     assert result.exit_code == 1
     assert "session not found: nonexistent" in result.output
 
 
 def test_status_ambiguous_prefix_lists_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     _store_session(tmp_path, "status-aa")
     _store_session(tmp_path, "status-ab")
     result = runner.invoke(cli, ["status", "status-a"])
@@ -410,7 +410,7 @@ def test_status_ambiguous_prefix_lists_matches(tmp_path: Path, monkeypatch: pyte
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_launch_to_query_exited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     script = tmp_path / "hello.py"
     script.write_text("print('hello')")
     record = json.loads(runner.invoke(cli, ["run", "--headless", "--name", "e2e-ok", str(script)]).output)
@@ -426,7 +426,7 @@ def test_launch_to_query_exited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_launch_to_query_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     script = tmp_path / "fail.py"
     script.write_text("import sys; sys.exit(42)")
     record = json.loads(runner.invoke(cli, ["run", "--headless", "--name", "e2e-fail", str(script)]).output)
@@ -440,7 +440,7 @@ def test_launch_to_query_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_bare_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul script.py`` is equivalent to ``psoul run script.py``."""
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     script = tmp_path / "hello.py"
     script.write_text("pass")
     result = runner.invoke(cli, [str(script)])
@@ -454,7 +454,7 @@ def test_bare_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_bare_file_with_global_verbose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul -v script.py`` — global options parsed before disambiguation."""
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     script = tmp_path / "hello.py"
     script.write_text("pass")
     result = runner.invoke(cli, ["-v", str(script)])
@@ -474,7 +474,7 @@ def test_bare_nonexistent_file_errors_unknown_command(tmp_path: Path) -> None:
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_bare_file_passes_extra_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul script.py extra --child-flag`` passes trailing tokens to run."""
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     script = tmp_path / "echo.py"
     script.write_text("pass")
     result = runner.invoke(cli, [str(script), "extra", "--child-flag"])

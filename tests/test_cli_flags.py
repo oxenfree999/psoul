@@ -82,7 +82,7 @@ def test_open_db_lock_translates_to_clean_cli_error(
     invocation: list[str],
     needs_script: bool,
 ) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     args = list(invocation)
     if needs_script:
         script = tmp_path / "noop.py"

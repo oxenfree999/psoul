@@ -10,9 +10,9 @@ import typer
 from typer.testing import CliRunner
 
 from psoul.cli.main import cli, parse_tags
-from psoul.db import open_db
-from psoul.session import LaunchMode, Session, SessionState, TargetType
-from psoul.store import SessionStore
+from psoul.core.db import open_db
+from psoul.core.session import LaunchMode, Session, SessionState, TargetType
+from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
 runner = CliRunner()
@@ -115,7 +115,7 @@ class TestParseTags:
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_run_tag_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.db.default_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     script = tmp_path / "noop.py"
     script.write_text("pass")
     result = runner.invoke(

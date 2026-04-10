@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from psoul.db import DB_NAME, SCHEMA_VERSION, open_db, resolve_state_dir
+from psoul.core.db import DB_NAME, SCHEMA_VERSION, open_db, resolve_state_dir
 
 _INSERT_SESSION = (
     "INSERT INTO sessions (session_id, state, launch_mode, launch_time, target_type, psoul_version) "
@@ -31,7 +31,7 @@ def test_resolve_state_dir_uses_override(tmp_path: Path) -> None:
 
 def test_resolve_state_dir_uses_default(tmp_path: Path) -> None:
     default = tmp_path / "default-state"
-    with patch("psoul.db.default_state_dir", return_value=default):
+    with patch("psoul.core.db.default_state_dir", return_value=default):
         result = resolve_state_dir()
     assert result == default
     assert default.is_dir()
@@ -190,7 +190,7 @@ def test_migration_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     conn.close()
 
     applied = []
-    monkeypatch.setattr("psoul.db._MIGRATIONS", {0: lambda c: applied.append(0)})
+    monkeypatch.setattr("psoul.core.db._MIGRATIONS", {0: lambda c: applied.append(0)})
     conn = open_db(tmp_path)
     version = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
     conn.close()
@@ -208,7 +208,7 @@ def test_migration_rollback_on_failure(tmp_path: Path, monkeypatch: pytest.Monke
         msg = "intentional failure"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("psoul.db._MIGRATIONS", {0: bad_migration})
+    monkeypatch.setattr("psoul.core.db._MIGRATIONS", {0: bad_migration})
     with pytest.raises(RuntimeError, match="intentional failure"):
         open_db(tmp_path)
 
@@ -243,7 +243,7 @@ def test_open_db_wal_pragma_guard(
         conn.set_trace_callback(statements.append)
         return conn
 
-    monkeypatch.setattr("psoul.db.sqlite3.connect", traced_connect)
+    monkeypatch.setattr("psoul.core.db.sqlite3.connect", traced_connect)
     open_db(tmp_path).close()
 
     issued_wal = any("PRAGMA journal_mode = WAL" in s for s in statements)

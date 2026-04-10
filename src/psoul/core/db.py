@@ -4,7 +4,7 @@ import collections.abc
 import sqlite3
 from pathlib import Path
 
-from psoul.config import default_state_dir
+from psoul.core.config import default_state_dir
 
 SCHEMA_VERSION = 1
 DB_NAME = "psoul.db"

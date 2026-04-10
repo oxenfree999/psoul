@@ -7,7 +7,7 @@ giving ~16 million unique combinations before collisions.
 
 import secrets
 
-from psoul.session import validate_session_id
+from psoul.core.session import validate_session_id
 
 ADJECTIVES: tuple[str, ...] = (
     "agile",

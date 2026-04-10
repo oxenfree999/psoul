@@ -9,9 +9,9 @@ from typing import cast
 
 import pytest
 
-from psoul.db import open_db
-from psoul.session import LaunchMode, Session, SessionError, SessionState, TargetType
-from psoul.store import SessionStore
+from psoul.core.db import open_db
+from psoul.core.session import LaunchMode, Session, SessionError, SessionState, TargetType
+from psoul.core.store import SessionStore
 
 
 def _session(
