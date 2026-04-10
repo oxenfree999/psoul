@@ -1,6 +1,5 @@
 """Tests for configuration schema, discovery, loading, and CLI commands."""
 
-import dataclasses
 import json
 import tomllib
 from pathlib import Path
@@ -12,6 +11,7 @@ from typer.testing import CliRunner
 
 from psoul.cli.main import cli
 from psoul.config import (
+    _GENERATED_SECTIONS,
     LaunchConfig,
     OutputConfig,
     PathsConfig,
@@ -150,6 +150,15 @@ def test_load_config_coerces_string_to_path(
     assert isinstance(getattr(getattr(config, section), key), Path)
 
 
+def test_load_config_expands_user_in_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser reads USERPROFILE first
+    toml_file = tmp_path / "psoul.toml"
+    toml_file.write_text('[paths]\nstate_dir = "~/foo"\n')
+    config = load_config(toml_file)
+    assert config.paths.state_dir == tmp_path / "foo"
+
+
 @pytest.mark.parametrize(
     ("toml_content", "match"),
     [
@@ -197,6 +206,13 @@ def test_load_config_rejects_invalid_duration(tmp_path: Path, toml_content: str,
         load_config(toml_file)
 
 
+def test_load_config_rejects_invalid_launch_mode(tmp_path: Path) -> None:
+    toml_file = tmp_path / "psoul.toml"
+    toml_file.write_text('[launch]\nmode = "bogus"\n')
+    with pytest.raises(ValueError, match=r"\[launch\] mode: expected one of \[attached, headless\], got 'bogus'"):
+        load_config(toml_file)
+
+
 def test_find_config_file_override_missing(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         find_config_file(tmp_path / "nonexistent.toml")
@@ -231,10 +247,9 @@ def test_find_config_file_discovery_precedence(tmp_path: Path, monkeypatch: pyte
     assert result.name == "psoul.toml"
 
 
-def test_build_pyproject_psoul_table_has_all_sections() -> None:
+def test_build_pyproject_psoul_table_has_wired_sections() -> None:
     table = build_pyproject_psoul_table()
-    section_names = {f.name for f in dataclasses.fields(PsoulConfig)}
-    assert set(table) == section_names
+    assert set(table) == _GENERATED_SECTIONS
 
 
 def test_inject_empty_pyproject(tmp_path: Path) -> None:
@@ -243,8 +258,7 @@ def test_inject_empty_pyproject(tmp_path: Path) -> None:
     inject_pyproject_config(pyproject)
     data = tomllib.loads(pyproject.read_text())
     assert "psoul" in data["tool"]
-    section_names = {f.name for f in dataclasses.fields(PsoulConfig)}
-    assert set(data["tool"]["psoul"]) == section_names
+    assert set(data["tool"]["psoul"]) == _GENERATED_SECTIONS
 
 
 def test_inject_preserves_existing_tool_sections(tmp_path: Path) -> None:

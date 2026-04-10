@@ -99,18 +99,20 @@ def _resolve_session_selector(store: SessionStore, selector: str) -> Session:
     return matches[0]
 
 
-def parse_tags(raw: list[str] | None) -> dict[str, str] | None:
+def parse_tags(raw: list[str] | None, defaults: dict[str, str] | None = None) -> dict[str, str] | None:
     """Parse ``--tag key=value`` CLI arguments into a tag dict.
 
-    Each string is split on the first ``=``.  Duplicate keys keep the
-    last value.
+    Each string is split on the first ``=``.  Duplicate keys keep the last
+    value.  When *defaults* is provided, parsed CLI tags merge on top of
+    them; CLI tags win on conflict.
 
     Args:
         raw (list[str] | None): Raw ``--tag`` values from Typer, or ``None``.
+        defaults (dict[str, str] | None): Defaults the parsed CLI tags merge into.
 
     Returns:
-        dict[str, str] | None: Parsed tags, or ``None`` when *raw* is ``None``
-            or empty.
+        dict[str, str] | None: Parsed tags merged with *defaults*, or ``None``
+            when both are empty.
 
     Raises:
         typer.BadParameter: A tag is missing ``=`` or has an empty key.
@@ -120,11 +122,13 @@ def parse_tags(raw: list[str] | None) -> dict[str, str] | None:
         {'env': 'dev', 'team': 'platform'}
         >>> parse_tags(["key=a=b"])  # value can contain '='
         {'key': 'a=b'}
+        >>> parse_tags(["env=prod"], defaults={"env": "dev"})  # CLI wins
+        {'env': 'prod'}
         >>> parse_tags(None)  # returns None
 
     """
     if not raw:
-        return None
+        return defaults or None
     tags: dict[str, str] = {}
     for item in raw:
         if "=" not in item:
@@ -137,7 +141,7 @@ def parse_tags(raw: list[str] | None) -> dict[str, str] | None:
             msg = f"invalid tag (empty key): {item!r}"
             raise typer.BadParameter(msg)
         tags[key] = value
-    return tags
+    return (defaults or {}) | tags
 
 
 @cli.callback()
@@ -171,7 +175,7 @@ def _main(
         _launch_repl(ctx)
 
 
-def _launch_repl(ctx: typer.Context, name: str | None = None, tags: dict[str, str] | None = None) -> None:
+def _launch_repl(ctx: typer.Context, name: str | None = None, tag: list[str] | None = None) -> None:
     """Shared REPL launch logic for bare `psoul` and `psoul repl`."""
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
@@ -187,7 +191,7 @@ def _launch_repl(ctx: typer.Context, name: str | None = None, tags: dict[str, st
         if SessionStore(conn).get(session_id) is not None:
             print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
             raise typer.Exit(ExitCode.ERROR)
-        run_repl(session_id, conn, db_path=state_dir / DB_NAME, tags=tags)
+        run_repl(session_id, conn, db_path=state_dir / DB_NAME, tags=parse_tags(tag, defaults=cfg.session.tags))
     except sqlite3.IntegrityError:
         print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
@@ -202,7 +206,7 @@ def repl(
     tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
 ) -> None:
     """Start an interactive REPL session."""
-    _launch_repl(ctx, name=name, tags=parse_tags(tag))
+    _launch_repl(ctx, name=name, tag=tag)
 
 
 @cli.command()
@@ -291,7 +295,9 @@ def run(
             extra_args=extra_args,
             name=name,
             headless=headless,
-            tags=parse_tags(tag),
+            tags=parse_tags(tag, defaults=cfg.session.tags),
+            python_path=cfg.python.python_path or Path(sys.executable),
+            default_mode=LaunchMode(cfg.launch.mode),
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

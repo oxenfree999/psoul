@@ -159,13 +159,12 @@ def test_gather(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.provenance.platform.node", lambda: "testhost")
     monkeypatch.setattr("psoul.provenance.platform.machine", lambda: "aarch64")
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
 
     script = tmp_path / "train.py"
     script.write_bytes(b"print('hi')")
     (tmp_path / "uv.lock").write_bytes(b"lockfile content")
 
-    result = gather(TargetType.script, "train.py", tmp_path)
+    result = gather(TargetType.script, "train.py", tmp_path, Path("/usr/bin/python3"))
 
     assert result["git_sha"] == FAKE_SHA
     assert result["git_dirty"] is True

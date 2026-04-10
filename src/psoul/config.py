@@ -20,6 +20,7 @@ from tomlkit.items import Table
 from tomlkit.toml_file import TOMLFile
 
 from psoul.duration import parse_duration
+from psoul.session import LaunchMode
 
 APP_NAME = "psoul"
 
@@ -46,10 +47,9 @@ def _coerce_field(section: str, key: str, value: object, expected: type, *, dura
         msg = f"[{section}] {key}: unexpected null value"
         raise ValueError(msg)
 
-    # Path coercion: TOML has no path type, accept strings
-    if base is Path:
+    if base is Path:  # TOML has no path type, accept strings
         if isinstance(value, str):
-            return Path(value)
+            return Path(value).expanduser()  # so "~/foo" resolves to $HOME/foo
         msg = f"[{section}] {key}: expected path string, got {type(value).__name__}"
         raise TypeError(msg)
 
@@ -126,12 +126,12 @@ class PathsConfig:
 class PythonConfig:
     """[python] section.
 
-    python_path (Path | None): overrides uv/PATH discovery with an explicit binary. Default: None.
+    python_path (Path | None): override Python interpreter used by ``psoul run``. Default: None.
     """
 
     python_path: Path | None = field(
         default=None,
-        metadata={"description": "override Python binary, bypasses uv discovery", "example": "/usr/bin/python3"},
+        metadata={"description": "override Python interpreter used by psoul run", "example": "/usr/bin/python3"},
     )
 
 
@@ -143,6 +143,14 @@ class LaunchConfig:
     """
 
     mode: str = field(default="attached", metadata={"description": "attached (default) or headless"})
+
+    def __post_init__(self) -> None:
+        """Reject mode values that aren't in the LaunchMode enum."""
+        try:
+            LaunchMode(self.mode)
+        except ValueError as exc:
+            msg = f"[launch] mode: expected one of [{', '.join(LaunchMode)}], got {self.mode!r}"
+            raise ValueError(msg) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +244,8 @@ _SECTION_CLASSES: dict[str, type] = {
     "output": OutputConfig,
     "retention": RetentionConfig,
 }
+
+_GENERATED_SECTIONS: frozenset[str] = frozenset({"paths", "python", "launch", "session"})
 
 
 def find_config_file(override: Path | None = None) -> Path | None:
@@ -376,15 +386,11 @@ def _apply_line_ending(content: str, linesep: str) -> str:
 
 
 def _iter_config_comments() -> Iterator[tuple[str, list[str]]]:
-    """Yield ``(section_name, comment_lines)`` for each PsoulConfig section.
-
-    Each comment line is a formatted TOML key-value pair with its description,
-    e.g. ``'mode = "attached"  # attached (default) or headless'``.  Both
-    ``generate_config()`` and ``build_pyproject_psoul_table()`` consume this
-    iterator so the field-walking logic and example values live in one place.
-    """
+    """Yield ``(section_name, comment_lines)`` for sections in ``_GENERATED_SECTIONS``."""
     defaults = PsoulConfig()
     for section_field in dataclasses.fields(defaults):
+        if section_field.name not in _GENERATED_SECTIONS:
+            continue
         section = getattr(defaults, section_field.name)
         comments: list[str] = []
         for f in dataclasses.fields(section):
