@@ -54,7 +54,7 @@ def test_parse_launch_target(
     expected_type: TargetType,
     expected_target: str,
 ) -> None:
-    t = parse_launch_target(target=target, module=module, extra_args=extra)
+    t = parse_launch_target(target=target, module=module, extra_args=extra, python_path=Path(sys.executable))
     assert t.target_type == expected_type
     assert t.target == expected_target
     assert t.target_args == tuple(extra)
@@ -69,7 +69,7 @@ def test_parse_launch_target(
 )
 def test_parse_launch_target_rejects_bad_input(target: str | None, module: str | None, match: str) -> None:
     with pytest.raises(ValueError, match=match):
-        parse_launch_target(target=target, module=module, extra_args=[])
+        parse_launch_target(target=target, module=module, extra_args=[], python_path=Path(sys.executable))
 
 
 def test_resolve_session_id_explicit() -> None:
@@ -86,34 +86,90 @@ def test_resolve_session_id_generates_four_words() -> None:
 
 
 def test_as_cmd_script() -> None:
-    t = LaunchTarget(TargetType.script, "app.py", ("--flag",))
+    t = LaunchTarget(TargetType.script, "app.py", ("--flag",), Path(sys.executable))
     assert t.as_cmd() == [sys.executable, "app.py", "--flag"]
 
 
 def test_as_cmd_module() -> None:
-    t = LaunchTarget(TargetType.module, "http.server", ("8000",))
+    t = LaunchTarget(TargetType.module, "http.server", ("8000",), Path(sys.executable))
     assert t.as_cmd() == [sys.executable, "-m", "http.server", "8000"]
+
+
+@pytest.mark.parametrize(
+    ("target_type", "target", "expected_prefix"),
+    [
+        (TargetType.script, "app.py", ["fake-python", "app.py"]),
+        (TargetType.module, "http.server", ["fake-python", "-m", "http.server"]),
+    ],
+    ids=["script", "module"],
+)
+def test_as_cmd_uses_configured_python_path(target_type: TargetType, target: str, expected_prefix: list[str]) -> None:
+    t = LaunchTarget(target_type, target, ("--flag",), Path("fake-python"))
+    assert t.as_cmd() == [*expected_prefix, "--flag"]
 
 
 def test_build_launch_request_freezes_tags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: False)
     tags = {"env": "dev"}
-    req = build_launch_request(target="x.py", module=None, extra_args=[], name="a-b-c-d", headless=False, tags=tags)
+    req = build_launch_request(
+        target="x.py",
+        module=None,
+        extra_args=[],
+        name="a-b-c-d",
+        headless=False,
+        tags=tags,
+        python_path=Path(sys.executable),
+        default_mode=LaunchMode.attached,
+    )
     tags["env"] = "prod"
     assert req.tags is not None
     assert req.tags["env"] == "dev"
 
 
-def test_build_headless_when_no_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: False)
-    req = build_launch_request(target="x.py", module=None, extra_args=[], name="a-b-c-d", headless=False, tags=None)
-    assert req.launch_mode == LaunchMode.headless
+@pytest.mark.parametrize(
+    ("isatty", "headless", "default_mode", "expected"),
+    [
+        (False, False, LaunchMode.attached, LaunchMode.headless),
+        (True, True, LaunchMode.attached, LaunchMode.headless),
+        (True, False, LaunchMode.headless, LaunchMode.headless),
+        (True, False, LaunchMode.attached, LaunchMode.attached),
+    ],
+    ids=["no-tty-forces-headless", "flag-forces-headless", "default-headless", "default-attached"],
+)
+def test_build_launch_request_resolves_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    isatty: bool,
+    headless: bool,
+    default_mode: LaunchMode,
+    expected: LaunchMode,
+) -> None:
+    monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: isatty)
+    req = build_launch_request(
+        target="x.py",
+        module=None,
+        extra_args=[],
+        name="a-b-c-d",
+        headless=headless,
+        tags=None,
+        python_path=Path(sys.executable),
+        default_mode=default_mode,
+    )
+    assert req.launch_mode == expected
 
 
-def test_build_headless_flag_overrides_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_launch_request_threads_python_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.launch.sys.stdin.isatty", lambda: True)
-    req = build_launch_request(target="x.py", module=None, extra_args=[], name="a-b-c-d", headless=True, tags=None)
-    assert req.launch_mode == LaunchMode.headless
+    req = build_launch_request(
+        target="x.py",
+        module=None,
+        extra_args=[],
+        name="a-b-c-d",
+        headless=False,
+        tags=None,
+        python_path=Path("/fake/python"),
+        default_mode=LaunchMode.attached,
+    )
+    assert req.target.python_path == Path("/fake/python")
 
 
 def _script_request(
@@ -123,7 +179,7 @@ def _script_request(
     return LaunchRequest(
         session_id=name,
         launch_mode=launch_mode,
-        target=LaunchTarget(TargetType.script, "-c", (code,)),
+        target=LaunchTarget(TargetType.script, "-c", (code,), Path(sys.executable)),
         cwd=Path.cwd(),
     )
 
@@ -196,7 +252,7 @@ def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: 
     req = _script_request("pass", launch_mode=LaunchMode.attached)
     final = launch_attached(req, store)
 
-    assert calls == [(TargetType.script, "-c", req.cwd)]
+    assert calls == [(TargetType.script, "-c", req.cwd, Path(sys.executable))]
     assert final.git_sha == "b" * 40
     assert final.git_dirty is True
     assert final.script_hash is None

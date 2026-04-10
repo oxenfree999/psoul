@@ -25,18 +25,18 @@ class LaunchTarget:
     target_type: TargetType
     target: str
     target_args: tuple[str, ...]
+    python_path: Path
 
     def as_cmd(self) -> list[str]:
         """Build the subprocess command list."""
-        prefix = (
-            [sys.executable, "-m", self.target]
-            if self.target_type == TargetType.module
-            else [sys.executable, self.target]
-        )
+        python = str(self.python_path)
+        prefix = [python, "-m", self.target] if self.target_type == TargetType.module else [python, self.target]
         return [*prefix, *self.target_args]
 
 
-def parse_launch_target(*, target: str | None, module: str | None, extra_args: Sequence[str]) -> LaunchTarget:
+def parse_launch_target(
+    *, target: str | None, module: str | None, extra_args: Sequence[str], python_path: Path
+) -> LaunchTarget:
     """Build a LaunchTarget from mutually exclusive CLI inputs.
 
     Exactly one of *target* or *module* must be provided.
@@ -45,6 +45,7 @@ def parse_launch_target(*, target: str | None, module: str | None, extra_args: S
         target (str | None): Script path.
         module (str | None): Module name for ``-m`` invocation.
         extra_args (Sequence[str]): Additional arguments passed to the target.
+        python_path (Path): Interpreter the target should run under.
 
     Returns:
         LaunchTarget: Validated target with its argument tuple.
@@ -55,11 +56,12 @@ def parse_launch_target(*, target: str | None, module: str | None, extra_args: S
     """
     if target is not None and module is not None:
         raise ValueError("choose either a script target or -m module")
+    args = tuple(extra_args)
     if module is not None:
-        return LaunchTarget(target_type=TargetType.module, target=module, target_args=tuple(extra_args))
+        return LaunchTarget(target_type=TargetType.module, target=module, target_args=args, python_path=python_path)
     if target is None:
         raise ValueError("launch target is required")
-    return LaunchTarget(target_type=TargetType.script, target=target, target_args=tuple(extra_args))
+    return LaunchTarget(target_type=TargetType.script, target=target, target_args=args, python_path=python_path)
 
 
 def resolve_session_id(name: str | None) -> str:
@@ -100,12 +102,13 @@ def build_launch_request(
     name: str | None,
     headless: bool,
     tags: dict[str, str] | None,
+    python_path: Path,
+    default_mode: LaunchMode,
 ) -> LaunchRequest:
     """Assemble a frozen LaunchRequest from CLI inputs.
 
-    Resolves the session ID, parses the launch target, detects whether
-    stdin is a TTY (falling back to headless if not), and freezes the
-    tags mapping.
+    The launch mode is headless when ``--headless`` is set or stdin is
+    not a TTY; otherwise *default_mode* applies.
 
     Args:
         target (str | None): Script path.
@@ -114,15 +117,19 @@ def build_launch_request(
         name (str | None): Explicit session ID, or ``None`` to auto-generate.
         headless (bool): Force headless launch mode.
         tags (dict[str, str] | None): Session tags from ``--tag`` flags.
+        python_path (Path): Python interpreter that runs the target.
+        default_mode (LaunchMode): Mode used when ``--headless`` is unset and stdin is a TTY.
 
     Returns:
         LaunchRequest: Frozen snapshot of everything needed to create a session.
 
     """
+    forced_headless = headless or not sys.stdin.isatty()
+    launch_target = parse_launch_target(target=target, module=module, extra_args=extra_args, python_path=python_path)
     return LaunchRequest(
         session_id=resolve_session_id(name),
-        launch_mode=LaunchMode.headless if headless or not sys.stdin.isatty() else LaunchMode.attached,
-        target=parse_launch_target(target=target, module=module, extra_args=extra_args),
+        launch_mode=LaunchMode.headless if forced_headless else default_mode,
+        target=launch_target,
         cwd=Path.cwd(),
         tags=MappingProxyType(dict(tags)) if tags is not None else None,
     )
@@ -130,7 +137,7 @@ def build_launch_request(
 
 def _create_session(request: LaunchRequest, store: SessionStore) -> Session:
     """Persist a new session in starting state and return it."""
-    provenance = gather(request.target.target_type, request.target.target, request.cwd)
+    provenance = gather(request.target.target_type, request.target.target, request.cwd, request.target.python_path)
     session = Session(
         session_id=request.session_id,
         state=SessionState.starting,

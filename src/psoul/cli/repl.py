@@ -269,7 +269,7 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path, tags: dic
 
     """
     store = SessionStore(conn)
-    provenance = gather(TargetType.repl, None, Path.cwd())
+    provenance = gather(TargetType.repl, None, Path.cwd(), Path(sys.executable))
     session = Session(
         session_id=session_id,
         state=SessionState.starting,

@@ -94,6 +94,23 @@ class TestParseTags:
         with pytest.raises(typer.BadParameter, match=match):
             parse_tags(raw)
 
+    @pytest.mark.parametrize(
+        ("raw", "defaults", "expected"),
+        [
+            (None, None, None),
+            (None, {"env": "dev"}, {"env": "dev"}),
+            ([], {"env": "dev"}, {"env": "dev"}),
+            (["team=ml"], {"env": "dev"}, {"env": "dev", "team": "ml"}),
+            (["env=prod"], {"env": "dev"}, {"env": "prod"}),
+            (["env=prod", "team=ml"], {"env": "dev", "region": "us"}, {"env": "prod", "region": "us", "team": "ml"}),
+        ],
+        ids=["both-empty", "defaults-only-none-raw", "defaults-only-empty-raw", "merge", "cli-wins", "complex-merge"],
+    )
+    def test_merges_defaults(
+        self, raw: list[str] | None, defaults: dict[str, str] | None, expected: dict[str, str] | None
+    ) -> None:
+        assert parse_tags(raw, defaults=defaults) == expected
+
 
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
@@ -114,6 +131,31 @@ def test_run_tag_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         conn.close()
     assert session is not None
     assert session.tags == {"env": "dev", "team": "backend"}
+
+
+@pytest.mark.parametrize(
+    ("mock_target", "cli_args"),
+    [
+        ("psoul.cli.main.build_launch_request", ["run", "--tag", "env=prod", "noop.py"]),
+        ("psoul.cli.main.run_repl", ["repl", "--name", "tag-merge", "--tag", "env=prod"]),
+    ],
+    ids=["run", "repl"],
+)
+def test_command_merges_config_tags_with_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_target: str, cli_args: list[str]
+) -> None:
+    config, _ = _write_config(tmp_path)
+    config.write_text(f'{config.read_text()}\n[session.tags]\nenv = "dev"\nteam = "ops"\n')
+    captured: dict[str, object] = {}
+
+    def fake(*_args: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(mock_target, fake)
+    result = runner.invoke(cli, ["--config", str(config), *cli_args])
+    assert result.exit_code == 0
+    assert captured["tags"] == {"env": "prod", "team": "ops"}
 
 
 def test_repl_tag_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

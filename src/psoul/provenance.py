@@ -147,7 +147,7 @@ def script_hash(target_type: TargetType, target: str | None, cwd: Path) -> str |
     return file_hash(path)
 
 
-def gather(target_type: TargetType, target: str | None, cwd: Path) -> SessionProvenance:
+def gather(target_type: TargetType, target: str | None, cwd: Path, python_path: Path) -> SessionProvenance:
     """Collect all provenance fields as a dict compatible with Session kwargs.
 
     Captures git state, file hashes, and platform metadata at launch time.
@@ -156,6 +156,9 @@ def gather(target_type: TargetType, target: str | None, cwd: Path) -> SessionPro
         target_type (TargetType): Whether the target is a script, module, or repl.
         target (str | None): Script path or module name.
         cwd (Path): Working directory for git and file lookups.
+        python_path (Path): Interpreter the session will run under — the
+            configured ``python.python_path`` for launched targets, or
+            ``sys.executable`` for the in-process REPL.
 
     Returns:
         SessionProvenance: Dict of provenance fields ready to unpack into ``Session()``.
@@ -167,7 +170,7 @@ def gather(target_type: TargetType, target: str | None, cwd: Path) -> SessionPro
         "script_hash": script_hash(target_type, target, cwd),
         "lockfile_hash": find_lockfile_hash(cwd),
         "python_version": platform.python_version(),
-        "python_path": Path(sys.executable),
+        "python_path": python_path,
         "host": platform.node(),
         "os": sys.platform,
         "arch": platform.machine(),

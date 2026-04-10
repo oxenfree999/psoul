@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import sys
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -280,7 +281,7 @@ def test_run_repl_populates_provenance(db_path: Path, monkeypatch: pytest.Monkey
     conn = open_db(db_path.parent)
     try:
         run_repl("repl-prov", conn, db_path)
-        assert calls == [(TargetType.repl, None, Path.cwd())]
+        assert calls == [(TargetType.repl, None, Path.cwd(), Path(sys.executable))]
         session = SessionStore(conn).get("repl-prov")
         assert session is not None
         assert session.git_sha == "c" * 40
