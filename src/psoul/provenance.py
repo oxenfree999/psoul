@@ -52,9 +52,10 @@ def git_sha(cwd: Path) -> str | None:
             capture_output=True,
             text=True,
             check=True,
+            timeout=5,
         )
         return result.stdout.strip()
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
         return None
 
 
@@ -78,9 +79,10 @@ def git_dirty(cwd: Path) -> bool | None:
             capture_output=True,
             text=True,
             check=True,
+            timeout=5,
         )
         return bool(result.stdout.strip())
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
         return None
 
 
