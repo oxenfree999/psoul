@@ -416,6 +416,39 @@ def logs(
 
 
 @cli.command()
+def events(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+    json_flag: Annotated[bool, typer.Option("--json", help="Output JSON array instead of text.")] = False,
+) -> None:
+    """Print the event log for a session."""
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
+    try:
+        recover_sessions(conn)
+        session = _resolve_session_selector(SessionStore(conn), session_id)
+        rows = EventStore(conn).list(session.session_id)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    finally:
+        conn.close()
+    if json_flag:
+        print(json.dumps(rows))
+        return
+    for row in rows:
+        print(
+            row["sequence"],
+            row["generation"],
+            row["timestamp"],
+            row["event_type"],
+            json.dumps(row["payload"]),
+            sep="\t",
+        )
+
+
+@cli.command()
 def version() -> None:
     """Show psoul version."""
     print(f"psoul {VERSION}")
