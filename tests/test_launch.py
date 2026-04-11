@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from collections.abc import Iterator
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -295,6 +296,24 @@ def test_attached_exit_records_result_failure(store: SessionStore) -> None:
     assert result["exit_code"] == 42
     assert result["duration_seconds"] is not None
     assert result["end_time"] is not None
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_headless_supervisor_records_realistic_duration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: headless duration must measure the full session, not just proc.wait()."""
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "sleep.py"
+    script.write_text("import time; time.sleep(0.3)")
+    result = runner.invoke(cli, ["run", "--headless", "--name", "sleepy", str(script)])
+    assert result.exit_code == 0
+    record = json.loads(result.output)
+    os.waitpid(record["supervisor_pid"], 0)
+    with closing(open_db(tmp_path)) as conn:
+        row = conn.execute("SELECT duration_seconds FROM results WHERE session_id = ?", ["sleepy"]).fetchone()
+    assert row is not None
+    assert row[0] is not None
+    assert row[0] >= 0.2
 
 
 def test_wait_for_exit_records_result_when_wait_raises(store: SessionStore) -> None:
