@@ -11,7 +11,9 @@ from pathlib import Path
 from types import MappingProxyType
 
 from psoul.core.db import open_db
+from psoul.core.events import EventStore
 from psoul.core.names import generate_session_id
+from psoul.core.output import drain_output
 from psoul.core.provenance import gather
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType, validate_session_id
 from psoul.core.store import SessionStore
@@ -186,19 +188,26 @@ def launch_headless(request: LaunchRequest, store: SessionStore, state_dir: Path
 
 
 def _supervise(request: LaunchRequest, state_dir: Path) -> None:
-    """Background supervisor: spawn target, wait, update session state."""
+    """Background supervisor: spawn target, capture output, wait, update session state."""
     conn = open_db(state_dir)
     try:
         sup_store = SessionStore(conn)
+        event_store = EventStore(conn)
         proc = subprocess.Popen(  # noqa: S603
             request.target.as_cmd(),
             cwd=request.cwd,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-        sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
-        wait_for_exit(request.session_id, proc, sup_store)
+        session = sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
+        wait_for_exit(
+            request.session_id,
+            proc,
+            sup_store,
+            event_store=event_store,
+            generation=session.generation,
+        )
     finally:
         conn.close()
 
@@ -222,13 +231,30 @@ def launch_attached(request: LaunchRequest, store: SessionStore) -> Session:
     return wait_for_exit(request.session_id, proc, store)
 
 
-def wait_for_exit(session_id: str, proc: subprocess.Popen[bytes], store: SessionStore) -> Session:
+def wait_for_exit(
+    session_id: str,
+    proc: subprocess.Popen[bytes],
+    store: SessionStore,
+    *,
+    event_store: EventStore | None = None,
+    generation: int = 0,
+) -> Session:
     """Block until the process exits, then record the result and finalize the session.
+
+    When *event_store* is provided, stdout and stderr are drained into
+    the event log before waiting on the process. The duration timer
+    covers the full drain-and-wait window so headless sessions report
+    realistic session durations, not just the trailing ``proc.wait()``.
 
     Args:
         session_id (str): Session that owns this process.
         proc (subprocess.Popen[bytes]): The running process to wait on.
         store (SessionStore): Store for recording the result and updating state.
+        event_store (EventStore | None): When provided, drain *proc*'s
+            stdout/stderr into this store before waiting. Only meaningful
+            when *proc* was opened with ``stdout=PIPE`` / ``stderr=PIPE``.
+        generation (int): Session generation for the drained events. Ignored
+            when *event_store* is ``None``.
 
     Returns:
         Session: The completed session after the process has exited.
@@ -237,6 +263,8 @@ def wait_for_exit(session_id: str, proc: subprocess.Popen[bytes], store: Session
     start = time.monotonic()
     final_session: Session | None = None
     try:
+        if event_store is not None:
+            drain_output(proc, session_id=session_id, event_store=event_store, generation=generation)
         proc.wait()
     finally:
         duration = time.monotonic() - start
