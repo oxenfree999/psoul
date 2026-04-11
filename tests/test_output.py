@@ -22,6 +22,10 @@ from psoul.version import VERSION
 
 runner = CliRunner()
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
+requires_unix_pipes = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows SelectSelector only handles sockets, not pipes",
+)
 
 
 def _make_session(session_id: str = "test-session") -> Session:
@@ -42,6 +46,7 @@ def event_store(tmp_path: Path) -> Iterator[EventStore]:
         yield EventStore(conn)
 
 
+@requires_unix_pipes
 @pytest.mark.parametrize(
     ("code", "expected_type", "expected_text"),
     [
@@ -67,6 +72,7 @@ def test_drain_captures_single_stream(
     assert any(expected_text in str(e["payload"]) for e in events)
 
 
+@requires_unix_pipes
 def test_drain_captures_interleaved_streams(event_store: EventStore) -> None:
     with subprocess.Popen(  # noqa: S603
         [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
@@ -91,6 +97,7 @@ def test_drain_no_pipes_returns_immediately(event_store: EventStore) -> None:
     assert event_store.list("test-session") == []
 
 
+@requires_unix_pipes
 def test_drain_handles_non_utf8_bytes(event_store: EventStore) -> None:
     with subprocess.Popen(  # noqa: S603
         [

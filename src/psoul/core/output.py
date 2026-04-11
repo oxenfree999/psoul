@@ -31,6 +31,10 @@ def drain_output(
     immediately if *proc* has neither ``stdout`` nor ``stderr`` as a
     pipe.
 
+    Unix only — ``select.select`` on Windows operates on sockets, not
+    pipes. In practice this function is never reached on Windows
+    because ``launch_headless`` raises on the missing ``os.fork``.
+
     Args:
         proc (subprocess.Popen[bytes]): Running subprocess opened with
             ``stdout=PIPE`` and/or ``stderr=PIPE``.
