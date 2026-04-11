@@ -52,6 +52,8 @@ def test_main_help() -> None:
 │ run      Launch a Python target as a managed session.                        │
 │ ps       List sessions.                                                      │
 │ status   Show session detail.                                                │
+│ logs     Print captured stdout/stderr for a session.                         │
+│ events   Print the event log for a session.                                  │
 │ version  Show psoul version.                                                 │
 │ config   Show and manage configuration.                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯

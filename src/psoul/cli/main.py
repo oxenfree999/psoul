@@ -6,7 +6,7 @@ import sqlite3
 import sys
 import tomllib
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import click
 import tomlkit.exceptions
@@ -19,6 +19,7 @@ from psoul.cli.repl import run_repl
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
 from psoul.core.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
 from psoul.core.db import DB_NAME, open_db, resolve_state_dir
+from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
 from psoul.core.recovery import recover_sessions
 from psoul.core.session import LaunchMode, Session, SessionState
@@ -378,6 +379,73 @@ def status(
     for key, value in dataclasses.asdict(session).items():
         if value is not None:
             print(f"{key}: {value}")
+
+
+@cli.command()
+def logs(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+    stdout: Annotated[bool, typer.Option("--stdout", help="Show only captured stdout.")] = False,
+    stderr: Annotated[bool, typer.Option("--stderr", help="Show only captured stderr.")] = False,
+    generation: Annotated[int | None, typer.Option("--generation", help="Filter to a session generation.")] = None,
+) -> None:
+    """Print captured stdout/stderr for a session."""
+    if stdout and stderr:
+        raise typer.BadParameter("--stdout and --stderr cannot be used together.")
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
+    try:
+        recover_sessions(conn)
+        session = _resolve_session_selector(SessionStore(conn), session_id)
+        events = EventStore(conn).list(session.session_id, generation=generation)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    finally:
+        conn.close()
+    wanted: set[str] = set()
+    if not stderr:
+        wanted.add(EVENT_RUNTIME_STDOUT)
+    if not stdout:
+        wanted.add(EVENT_RUNTIME_STDERR)
+    for event in events:
+        if event["event_type"] in wanted:
+            payload = cast("dict[str, str]", event["payload"])
+            print(payload["text"], end="")
+
+
+@cli.command()
+def events(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+    json_flag: Annotated[bool, typer.Option("--json", help="Output JSON array instead of text.")] = False,
+) -> None:
+    """Print the event log for a session."""
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
+    try:
+        recover_sessions(conn)
+        session = _resolve_session_selector(SessionStore(conn), session_id)
+        rows = EventStore(conn).list(session.session_id)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    finally:
+        conn.close()
+    if json_flag:
+        print(json.dumps(rows))
+        return
+    for row in rows:
+        print(
+            row["sequence"],
+            row["generation"],
+            row["timestamp"],
+            row["event_type"],
+            json.dumps(row["payload"]),
+            sep="\t",
+        )
 
 
 @cli.command()
