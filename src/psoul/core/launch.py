@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -10,11 +11,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 
+import psutil
+
 from psoul.core.db import open_db
 from psoul.core.events import EventStore
 from psoul.core.names import generate_session_id
 from psoul.core.output import drain_output
 from psoul.core.provenance import gather
+from psoul.core.resources import ResourceSampler
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType, validate_session_id
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
@@ -187,8 +191,11 @@ def launch_headless(request: LaunchRequest, store: SessionStore, state_dir: Path
     return session, child_pid
 
 
+_SAMPLE_INTERVAL = 2.0  # seconds between resource samples
+
+
 def _supervise(request: LaunchRequest, state_dir: Path) -> None:
-    """Background supervisor: spawn target, capture output, wait, update session state."""
+    """Background supervisor: spawn target, capture output, sample resources, wait, update session state."""
     conn = open_db(state_dir)
     try:
         sup_store = SessionStore(conn)
@@ -201,13 +208,20 @@ def _supervise(request: LaunchRequest, state_dir: Path) -> None:
             stderr=subprocess.PIPE,
         )
         session = sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
-        wait_for_exit(
-            request.session_id,
-            proc,
-            sup_store,
-            event_store=event_store,
-            generation=session.generation,
-        )
+        sampler = ResourceSampler(psutil.Process(proc.pid), state_dir, request.session_id, session.generation)
+        sampler_thread = threading.Thread(target=sampler.run, args=(_SAMPLE_INTERVAL,), daemon=True)
+        sampler_thread.start()
+        try:
+            wait_for_exit(
+                request.session_id,
+                proc,
+                sup_store,
+                event_store=event_store,
+                generation=session.generation,
+            )
+        finally:
+            sampler.stop()
+            sampler_thread.join(timeout=5.0)
     finally:
         conn.close()
 

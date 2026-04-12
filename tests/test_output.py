@@ -16,6 +16,7 @@ from psoul.cli.main import cli
 from psoul.core.db import open_db
 from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.output import drain_output
+from psoul.core.resources import EVENT_RESOURCE_TELEMETRY
 from psoul.core.session import LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
@@ -129,3 +130,22 @@ def test_headless_supervisor_persists_stdout(tmp_path: Path, monkeypatch: pytest
     with closing(open_db(tmp_path)) as conn:
         events = EventStore(conn).list("e2e-capture", event_type=EVENT_RUNTIME_STDOUT)
     assert any("captured!" in str(e["payload"]) for e in events)
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_headless_supervisor_samples_resources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "sleep.py"
+    script.write_text("import time; time.sleep(1)")
+    result = runner.invoke(cli, ["run", "--headless", "--name", "e2e-resources", str(script)])
+    assert result.exit_code == 0
+    record = json.loads(result.output)
+    os.waitpid(record["supervisor_pid"], 0)
+    with closing(open_db(tmp_path)) as conn:
+        row = conn.execute(
+            "SELECT cpu_percent, memory_rss_mb FROM resource_samples WHERE session_id = ?", ("e2e-resources",)
+        ).fetchone()
+        events = EventStore(conn).list("e2e-resources", event_type=EVENT_RESOURCE_TELEMETRY)
+    assert row is not None
+    assert len(events) >= 1
