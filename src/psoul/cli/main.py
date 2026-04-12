@@ -449,6 +449,47 @@ def events(
 
 
 @cli.command()
+def resources(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+    json_flag: Annotated[bool, typer.Option("--json", help="Output JSON instead of text.")] = False,
+) -> None:
+    """Show the most recent resource sample for a session."""
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
+    try:
+        recover_sessions(conn)
+        session = _resolve_session_selector(SessionStore(conn), session_id)
+        cursor = conn.execute(
+            "SELECT generation, timestamp, cpu_percent, memory_rss_mb, memory_vms_mb,"
+            "       disk_read_mb, disk_write_mb,"
+            "       gpu_utilization_pct, gpu_memory_used_mb, gpu_memory_total_mb,"
+            "       gpu_temperature_c, gpu_power_watts"
+            " FROM resource_samples WHERE session_id = ?"
+            " ORDER BY generation DESC, timestamp DESC LIMIT 1",
+            (session.session_id,),
+        )
+        row = cursor.fetchone()
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    finally:
+        conn.close()
+    if row is None:
+        print("Error: no resource samples found.", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR)
+    sample = dict(zip(columns, row, strict=True))
+    if json_flag:
+        print(json.dumps(sample))
+        return
+    for key, value in sample.items():
+        if value is not None:
+            print(f"{key}: {value}")
+
+
+@cli.command()
 def version() -> None:
     """Show psoul version."""
     print(f"psoul {VERSION}")
