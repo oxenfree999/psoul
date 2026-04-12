@@ -208,9 +208,15 @@ def _supervise(request: LaunchRequest, state_dir: Path) -> None:
             stderr=subprocess.PIPE,
         )
         session = sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
-        sampler = ResourceSampler(psutil.Process(proc.pid), state_dir, request.session_id, session.generation)
-        sampler_thread = threading.Thread(target=sampler.run, args=(_SAMPLE_INTERVAL,), daemon=True)
-        sampler_thread.start()
+        sampler: ResourceSampler | None = None
+        sampler_thread: threading.Thread | None = None
+        try:
+            ps_process = psutil.Process(proc.pid)
+            sampler = ResourceSampler(ps_process, state_dir, request.session_id, session.generation)
+            sampler_thread = threading.Thread(target=sampler.run, args=(_SAMPLE_INTERVAL,), daemon=True)
+            sampler_thread.start()
+        except psutil.NoSuchProcess:
+            pass  # child already exited; skip sampling, wait_for_exit still finalizes
         try:
             wait_for_exit(
                 request.session_id,
@@ -220,8 +226,10 @@ def _supervise(request: LaunchRequest, state_dir: Path) -> None:
                 generation=session.generation,
             )
         finally:
-            sampler.stop()
-            sampler_thread.join(timeout=5.0)
+            if sampler is not None:
+                sampler.stop()
+            if sampler_thread is not None:
+                sampler_thread.join(timeout=5.0)
     finally:
         conn.close()
 

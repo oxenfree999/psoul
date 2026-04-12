@@ -149,3 +149,20 @@ def test_headless_supervisor_samples_resources(tmp_path: Path, monkeypatch: pyte
         events = EventStore(conn).list("e2e-resources", event_type=EVENT_RESOURCE_TELEMETRY)
     assert row is not None
     assert len(events) >= 1
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_headless_fast_exit_finalizes_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A target that exits immediately still finalizes the session."""
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    script = tmp_path / "instant.py"
+    script.write_text("pass")
+    result = runner.invoke(cli, ["run", "--headless", "--name", "e2e-fast", str(script)])
+    assert result.exit_code == 0
+    record = json.loads(result.output)
+    os.waitpid(record["supervisor_pid"], 0)
+    with closing(open_db(tmp_path)) as conn:
+        session = SessionStore(conn).get("e2e-fast")
+    assert session is not None
+    assert session.state == SessionState.exited
