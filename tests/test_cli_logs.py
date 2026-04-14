@@ -47,8 +47,11 @@ def seeded_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
         ([], "hello\nerr\nworld\n"),
         (["--stdout"], "hello\nworld\n"),
         (["--stderr"], "err\n"),
+        (["--follow"], "hello\nerr\nworld\n"),
+        (["--follow", "--stdout"], "hello\nworld\n"),
+        (["--follow", "--stderr"], "err\n"),
     ],
-    ids=["default-interleaves", "stdout-only", "stderr-only"],
+    ids=["default-interleaves", "stdout-only", "stderr-only", "follow-default", "follow-stdout", "follow-stderr"],
 )
 def test_logs_filters_streams(seeded_session: str, flags: list[str], expected_output: str) -> None:
     result = runner.invoke(cli, ["logs", seeded_session, *flags])
@@ -56,8 +59,11 @@ def test_logs_filters_streams(seeded_session: str, flags: list[str], expected_ou
     assert result.output == expected_output
 
 
-def test_logs_rejects_both_stream_flags(seeded_session: str) -> None:
-    result = runner.invoke(cli, ["logs", seeded_session, "--stdout", "--stderr"])
+@pytest.mark.parametrize(
+    "flags", [["--stdout", "--stderr"], ["--follow", "--stdout", "--stderr"]], ids=["no-follow", "follow"]
+)
+def test_logs_rejects_both_stream_flags(seeded_session: str, flags: list[str]) -> None:
+    result = runner.invoke(cli, ["logs", seeded_session, *flags])
     assert result.exit_code == 2
     assert "cannot be used together" in result.output
 
@@ -68,8 +74,11 @@ def test_logs_rejects_both_stream_flags(seeded_session: str) -> None:
         ([], "old\nnew\n"),
         (["--generation", "0"], "old\n"),
         (["--generation", "1"], "new\n"),
+        (["--follow"], "old\nnew\n"),
+        (["--follow", "--generation", "0"], "old\n"),
+        (["--follow", "--generation", "1"], "new\n"),
     ],
-    ids=["no-filter", "gen-zero", "gen-one"],
+    ids=["no-filter", "gen-zero", "gen-one", "follow-no-filter", "follow-gen-zero", "follow-gen-one"],
 )
 def test_logs_filters_by_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], expected_output: str
