@@ -95,6 +95,28 @@ def test_doctor_help() -> None:
 """)
 
 
+def test_events_help() -> None:
+    result = runner.invoke(cli, ["events", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul events [OPTIONS] SESSION_ID                                       \n\
+                                                                                \n\
+ Print the event log for a session.                                             \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id      TEXT  Session ID or unique prefix. [required]           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --follow  -f        Stream events live until the session exits.              │
+│ --json              Output JSON instead of text, as an array by default, or  │
+│                     NDJSON with --follow.                                    │
+│ --help    -h        Show this message and exit.                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
 def test_version_output_snapshot() -> None:
     result = runner.invoke(cli, ["version"])
     assert result.exit_code == 0

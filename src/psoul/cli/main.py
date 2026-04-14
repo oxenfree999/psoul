@@ -4,7 +4,9 @@ import dataclasses
 import json
 import sqlite3
 import sys
+import time
 import tomllib
+from contextlib import closing
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -22,7 +24,7 @@ from psoul.core.db import DB_NAME, open_db, resolve_state_dir
 from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
 from psoul.core.recovery import recover_sessions
-from psoul.core.session import LaunchMode, Session, SessionState
+from psoul.core.session import TERMINAL_STATES, LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
@@ -415,25 +417,74 @@ def logs(
             print(payload["text"], end="")
 
 
+_FOLLOW_POLL_INTERVAL = 0.25  # seconds between polls in events --follow
+
+
+def _print_event(row: dict[str, object], json_flag: bool) -> None:
+    """Emit one event as tab-separated text, or as NDJSON when json_flag is set, flushing each line."""
+    if json_flag:
+        print(json.dumps(row), flush=True)
+        return
+    print(
+        row["sequence"],
+        row["generation"],
+        row["timestamp"],
+        row["event_type"],
+        json.dumps(row["payload"]),
+        sep="\t",
+        flush=True,
+    )
+
+
+def _follow_events(session_id: str, state_dir: Path, json_flag: bool, last_seq: int) -> None:
+    """Poll for new events until the session reaches a terminal state with supervisor_pid cleared."""
+    try:
+        while True:
+            time.sleep(_FOLLOW_POLL_INTERVAL)
+            with closing(_open_db_or_exit(state_dir)) as conn:
+                recover_sessions(conn)
+                session = SessionStore(conn).get(session_id)
+                rows = EventStore(conn).list(session_id, after_sequence=last_seq)
+            for row in rows:
+                _print_event(row, json_flag)
+            if rows:
+                last_seq = cast("int", rows[-1]["sequence"])
+            if session is None or (session.state in TERMINAL_STATES and not rows and session.supervisor_pid is None):
+                return
+    except KeyboardInterrupt:
+        return
+
+
 @cli.command()
 def events(
     ctx: typer.Context,
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
-    json_flag: Annotated[bool, typer.Option("--json", help="Output JSON array instead of text.")] = False,
+    follow: Annotated[bool, typer.Option("--follow", "-f", help="Stream events live until the session exits.")] = False,
+    json_flag: Annotated[
+        bool,
+        typer.Option("--json", help="Output JSON instead of text, as an array by default, or NDJSON with --follow."),
+    ] = False,
 ) -> None:
     """Print the event log for a session."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
+    state_dir = resolve_state_dir(cfg.paths.state_dir)
     try:
-        recover_sessions(conn)
-        session = _resolve_session_selector(SessionStore(conn), session_id)
-        rows = EventStore(conn).list(session.session_id)
+        with closing(_open_db_or_exit(state_dir)) as conn:
+            recover_sessions(conn)
+            session = _resolve_session_selector(SessionStore(conn), session_id)
+            rows = EventStore(conn).list(session.session_id)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
-    finally:
-        conn.close()
+    if follow:
+        for row in rows:
+            _print_event(row, json_flag)
+        last_seq = cast("int", rows[-1]["sequence"]) if rows else -1
+        if session.state in TERMINAL_STATES and session.supervisor_pid is None:
+            return
+        _follow_events(session.session_id, state_dir, json_flag, last_seq)
+        return
     if json_flag:
         print(json.dumps(rows))
         return

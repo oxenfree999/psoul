@@ -230,7 +230,7 @@ class TestKeyBindings:
         assert _prompt_with_keys(keys) == expected
 
 
-def test_run_repl_exits_cleanly_and_records_supervisor_pid(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_repl_exits_cleanly_and_clears_supervisor_pid(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class FakePromptSession:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
@@ -245,7 +245,7 @@ def test_run_repl_exits_cleanly_and_records_supervisor_pid(db_path: Path, monkey
         session = SessionStore(conn).get("repl-session")
         assert session is not None
         assert session.state is SessionState.exited
-        assert session.supervisor_pid == os.getpid()
+        assert session.supervisor_pid is None
     finally:
         conn.close()
 

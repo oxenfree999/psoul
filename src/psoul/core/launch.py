@@ -229,7 +229,8 @@ def _supervise(request: LaunchRequest, state_dir: Path) -> None:
             if sampler is not None:
                 sampler.stop()
             if sampler_thread is not None:
-                sampler_thread.join(timeout=5.0)
+                sampler_thread.join()
+        sup_store.update(request.session_id, supervisor_pid=None)
     finally:
         conn.close()
 
@@ -250,7 +251,8 @@ def launch_attached(request: LaunchRequest, store: SessionStore) -> Session:
     _create_session(request, store)
     proc = subprocess.Popen(request.target.as_cmd(), cwd=request.cwd)  # noqa: S603
     store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
-    return wait_for_exit(request.session_id, proc, store)
+    wait_for_exit(request.session_id, proc, store)
+    return store.update(request.session_id, supervisor_pid=None)
 
 
 def wait_for_exit(
