@@ -75,7 +75,7 @@ def test_drain_captures_single_stream(
 
 @requires_unix_pipes
 def test_drain_captures_interleaved_streams(event_store: EventStore) -> None:
-    with subprocess.Popen(  # noqa: S603
+    with subprocess.Popen(
         [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -88,7 +88,7 @@ def test_drain_captures_interleaved_streams(event_store: EventStore) -> None:
 
 
 def test_drain_no_pipes_returns_immediately(event_store: EventStore) -> None:
-    with subprocess.Popen(  # noqa: S603
+    with subprocess.Popen(
         [sys.executable, "-c", "print('ignored')"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -100,7 +100,7 @@ def test_drain_no_pipes_returns_immediately(event_store: EventStore) -> None:
 
 @requires_unix_pipes
 def test_drain_handles_non_utf8_bytes(event_store: EventStore) -> None:
-    with subprocess.Popen(  # noqa: S603
+    with subprocess.Popen(
         [
             sys.executable,
             "-c",
