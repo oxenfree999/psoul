@@ -2,8 +2,10 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import closing
 from datetime import UTC, datetime
@@ -38,6 +40,20 @@ def _make_session(session_id: str = "test-session") -> Session:
         launch_time=datetime.now(UTC),
         psoul_version=VERSION,
     )
+
+
+def _write_config(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a psoul.toml pointing at a tmp_path-backed state dir."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    config = tmp_path / "psoul.toml"
+    config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n")
+    return config, state_dir
+
+
+def _psoul_bin() -> str:
+    """Path to the psoul console script in the current venv."""
+    return str(Path(sys.executable).parent / "psoul")
 
 
 @pytest.fixture
@@ -166,3 +182,47 @@ def test_headless_fast_exit_finalizes_session(tmp_path: Path, monkeypatch: pytes
         session = SessionStore(conn).get("e2e-fast")
     assert session is not None
     assert session.state == SessionState.exited
+    assert session.supervisor_pid is None
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_events_follow_captures_live_stream(tmp_path: Path) -> None:
+    config, _state_dir = _write_config(tmp_path)
+    script = tmp_path / "slow.py"
+    script.write_text("import sys\nimport time\nprint('hello')\nprint('oops', file=sys.stderr)\ntime.sleep(3)\n")
+    launch = runner.invoke(cli, ["--config", str(config), "run", "--headless", "--name", "e2e-follow", str(script)])
+    assert launch.exit_code == 0
+    record = json.loads(launch.output)
+    follow = subprocess.run(  # noqa: S603
+        [_psoul_bin(), "--config", str(config), "events", "--follow", "e2e-follow", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    os.waitpid(record["supervisor_pid"], 0)
+    assert follow.returncode == 0
+    event_types = {json.loads(line)["event_type"] for line in follow.stdout.strip().split("\n")}
+    assert {EVENT_RUNTIME_STDOUT, EVENT_RUNTIME_STDERR, EVENT_RESOURCE_TELEMETRY} <= event_types
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_events_follow_exits_cleanly_on_sigint(tmp_path: Path) -> None:
+    config, _state_dir = _write_config(tmp_path)
+    script = tmp_path / "sleep.py"
+    script.write_text("import time\ntime.sleep(1)\n")
+    launch = runner.invoke(cli, ["--config", str(config), "run", "--headless", "--name", "sigint-test", str(script)])
+    assert launch.exit_code == 0
+    record = json.loads(launch.output)
+    follow = subprocess.Popen(  # noqa: S603
+        [_psoul_bin(), "--config", str(config), "events", "--follow", "sigint-test"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.5)
+    follow.send_signal(signal.SIGINT)
+    _stdout, stderr = follow.communicate(timeout=5)
+    os.waitpid(record["supervisor_pid"], 0)
+    assert follow.returncode == 0, f"stderr: {stderr.decode(errors='replace')}"
