@@ -82,7 +82,7 @@ def _recover_session(
     """
     now_iso = now.isoformat()
     cursor = conn.execute(
-        "UPDATE sessions SET state = ? WHERE session_id = ? AND state = ?"
+        "UPDATE sessions SET state = ?, supervisor_pid = NULL WHERE session_id = ? AND state = ?"
         " AND NOT EXISTS ("
         "   SELECT 1 FROM results WHERE session_id = ? AND generation = ?"
         " )",
@@ -124,7 +124,7 @@ def _recover_session(
             return False
         current_state = SessionState.stopping
     cursor = conn.execute(
-        "UPDATE sessions SET state = ? WHERE session_id = ? AND state = ?",
+        "UPDATE sessions SET state = ?, supervisor_pid = NULL WHERE session_id = ? AND state = ?",
         [final_state.value, session_id, current_state.value],
     )
     if cursor.rowcount == 0:

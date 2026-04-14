@@ -1,6 +1,7 @@
 """Tests for the ``psoul events`` CLI command."""
 
 import json
+from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,27 +43,44 @@ def seeded_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     return "sesh01"
 
 
-def test_events_text_output(seeded_events: str) -> None:
-    result = runner.invoke(cli, ["events", seeded_events])
-    assert result.exit_code == 0
-    rows = [line.split("\t") for line in result.output.strip().split("\n")]
-    assert len(rows) == 3
-    assert [(r[0], r[1], r[3], r[4]) for r in rows] == [
-        ("0", "0", "runtime.stdout", '{"text": "hi"}'),
-        ("1", "0", "runtime.stderr", '{"text": "err"}'),
-        ("2", "0", "custom.event", "null"),
+def _parse_text(out: str) -> list[tuple[int, int, str, object]]:
+    rows = [row.split("\t") for row in out.strip().split("\n")]
+    return [(int(r[0]), int(r[1]), r[3], json.loads(r[4])) for r in rows]
+
+
+def _parse_json_array(out: str) -> list[tuple[int, int, str, object]]:
+    return [(o["sequence"], o["generation"], o["event_type"], o["payload"]) for o in json.loads(out)]
+
+
+def _parse_ndjson(out: str) -> list[tuple[int, int, str, object]]:
+    return [
+        (o["sequence"], o["generation"], o["event_type"], o["payload"])
+        for o in (json.loads(line) for line in out.strip().split("\n"))
     ]
 
 
-def test_events_json_output(seeded_events: str) -> None:
-    result = runner.invoke(cli, ["events", seeded_events, "--json"])
+@pytest.mark.parametrize(
+    ("extra_args", "parse"),
+    [
+        ([], _parse_text),
+        (["--json"], _parse_json_array),
+        (["--follow"], _parse_text),
+        (["--follow", "--json"], _parse_ndjson),
+    ],
+    ids=["text", "json-array", "follow-text", "follow-ndjson"],
+)
+def test_events_replay(
+    seeded_events: str,
+    extra_args: list[str],
+    parse: Callable[[str], list[tuple[int, int, str, object]]],
+) -> None:
+    result = runner.invoke(cli, ["events", seeded_events, *extra_args])
     assert result.exit_code == 0
-    parsed = json.loads(result.output)
-    assert [e["event_type"] for e in parsed] == ["runtime.stdout", "runtime.stderr", "custom.event"]
-    assert [e["payload"] for e in parsed] == [{"text": "hi"}, {"text": "err"}, None]
-    assert [e["sequence"] for e in parsed] == [0, 1, 2]
-    assert all(e["generation"] == 0 for e in parsed)
-    assert all(isinstance(e["timestamp"], str) and e["timestamp"] for e in parsed)
+    assert parse(result.output) == [
+        (0, 0, "runtime.stdout", {"text": "hi"}),
+        (1, 0, "runtime.stderr", {"text": "err"}),
+        (2, 0, "custom.event", None),
+    ]
 
 
 @pytest.mark.parametrize(

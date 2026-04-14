@@ -336,4 +336,4 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path, tags: dic
             )
         finally:
             store.update(session_id, state=SessionState.stopping)
-            store.update(session_id, state=final_state)
+            store.update(session_id, state=final_state, supervisor_pid=None)

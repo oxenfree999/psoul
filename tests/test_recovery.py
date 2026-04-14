@@ -119,6 +119,7 @@ def test_dead_running_session_recovered(
     session = store.get("orphan-a")
     assert session is not None
     assert session.state is SessionState.failed
+    assert session.supervisor_pid is None
     result = _get_result(conn, "orphan-a")
     assert result is not None
     assert result["outcome"] == "orphan_recovered"
@@ -180,6 +181,7 @@ def test_starting_session_grace_threshold(
     if should_recover:
         assert recovered == ["start-thresh"]
         assert session.state is SessionState.failed
+        assert session.supervisor_pid is None
         result = _get_result(conn, "start-thresh")
         assert result is not None
         assert result["outcome"] == "orphan_recovered"
@@ -216,6 +218,7 @@ def test_existing_result_row_finalizes_from_outcome(
     session = store.get("partial")
     assert session is not None
     assert session.state is expected_state
+    assert session.supervisor_pid is None
     result = _get_result(conn, "partial")
     assert result is not None
     assert result["outcome"] == outcome
@@ -250,8 +253,10 @@ def test_concurrent_recovery_does_not_double_write(tmp_path: Path) -> None:
     try:
         count = verify_conn.execute("SELECT COUNT(*) FROM results WHERE session_id = 'race-sess'").fetchone()[0]
         assert count == 1
-        state = verify_conn.execute("SELECT state FROM sessions WHERE session_id = 'race-sess'").fetchone()[0]
-        assert state == SessionState.failed.value
+        row = verify_conn.execute(
+            "SELECT state, supervisor_pid FROM sessions WHERE session_id = 'race-sess'"
+        ).fetchone()
+        assert row == (SessionState.failed.value, None)
     finally:
         verify_conn.close()
 

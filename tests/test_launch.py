@@ -226,9 +226,9 @@ def test_headless_supervisor_reaps_failure(store: SessionStore, tmp_path: Path) 
     assert final.state == SessionState.failed
 
 
-def test_attached_launch_records_current_process_as_supervisor(store: SessionStore) -> None:
+def test_attached_launch_clears_supervisor_pid_on_exit(store: SessionStore) -> None:
     final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached), store)
-    assert final.supervisor_pid == os.getpid()
+    assert final.supervisor_pid is None
 
 
 def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: pytest.MonkeyPatch) -> None:
