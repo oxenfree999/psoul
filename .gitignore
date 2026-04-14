@@ -11,3 +11,4 @@ dist/
 .lsp.json
 CLAUDE.md
 AGENTS.md
+.claude/
