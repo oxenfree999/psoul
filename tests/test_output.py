@@ -18,6 +18,7 @@ from psoul.cli.main import cli
 from psoul.core.db import open_db
 from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.output import drain_output
+from psoul.core.recovery import ProcessStatus, check_pid
 from psoul.core.resources import EVENT_RESOURCE_TELEMETRY
 from psoul.core.session import LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
@@ -194,6 +195,7 @@ def test_events_follow_captures_live_stream(tmp_path: Path) -> None:
     launch = runner.invoke(cli, ["--config", str(config), "run", "--headless", "--name", "e2e-follow", str(script)])
     assert launch.exit_code == 0
     record = json.loads(launch.output)
+    assert check_pid(record["supervisor_pid"]) is ProcessStatus.alive
     follow = subprocess.run(  # noqa: S603
         [_psoul_bin(), "--config", str(config), "events", "--follow", "e2e-follow", "--json"],
         capture_output=True,
@@ -216,6 +218,7 @@ def test_events_follow_exits_cleanly_on_sigint(tmp_path: Path) -> None:
     launch = runner.invoke(cli, ["--config", str(config), "run", "--headless", "--name", "sigint-test", str(script)])
     assert launch.exit_code == 0
     record = json.loads(launch.output)
+    assert check_pid(record["supervisor_pid"]) is ProcessStatus.alive
     follow = subprocess.Popen(  # noqa: S603
         [_psoul_bin(), "--config", str(config), "events", "--follow", "sigint-test"],
         stdout=subprocess.PIPE,
