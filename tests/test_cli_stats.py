@@ -1,4 +1,4 @@
-"""Tests for the ``psoul resources`` CLI command."""
+"""Tests for the ``psoul stats`` CLI command."""
 
 import json
 from contextlib import closing
@@ -49,8 +49,8 @@ def seeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     return SESSION_ID
 
 
-def test_resources_text_returns_latest(seeded: str) -> None:
-    result = runner.invoke(cli, ["resources", seeded])
+def test_stats_text_returns_latest(seeded: str) -> None:
+    result = runner.invoke(cli, ["stats", seeded])
     assert result.exit_code == 0
     assert "generation: 1" in result.output
     assert "cpu_percent: 12.5" in result.output
@@ -58,8 +58,8 @@ def test_resources_text_returns_latest(seeded: str) -> None:
     assert "gpu_utilization_pct" not in result.output  # NULLs omitted
 
 
-def test_resources_json_shape(seeded: str) -> None:
-    result = runner.invoke(cli, ["resources", seeded, "--json"])
+def test_stats_json_shape(seeded: str) -> None:
+    result = runner.invoke(cli, ["stats", seeded, "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.output)
     assert parsed["cpu_percent"] == 12.5
@@ -90,16 +90,14 @@ def test_resources_json_shape(seeded: str) -> None:
     ],
     ids=["prefix-match", "unknown-session"],
 )
-def test_resources_resolves_session_selector(
-    seeded: str, match: bool, expected_exit: int, expected_contains: str
-) -> None:
+def test_stats_resolves_session_selector(seeded: str, match: bool, expected_exit: int, expected_contains: str) -> None:
     selector = seeded[:3] if match else "nope"
-    result = runner.invoke(cli, ["resources", selector])
+    result = runner.invoke(cli, ["stats", selector])
     assert result.exit_code == expected_exit
     assert expected_contains in result.output
 
 
-def test_resources_no_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stats_no_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Error when session exists but has no resource samples."""
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     with closing(open_db(tmp_path)) as conn:
@@ -112,6 +110,6 @@ def test_resources_no_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
                 psoul_version=VERSION,
             )
         )
-    result = runner.invoke(cli, ["resources", "empty"])
+    result = runner.invoke(cli, ["stats", "empty"])
     assert result.exit_code == 1
     assert "Error: no resource samples found." in result.output

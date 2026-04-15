@@ -518,7 +518,7 @@ def events(
 
 
 @cli.command()
-def resources(
+def stats(
     ctx: typer.Context,
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
     json_flag: Annotated[bool, typer.Option("--json", help="Output JSON instead of text.")] = False,
