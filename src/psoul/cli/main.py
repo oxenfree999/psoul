@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 import tomllib
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 from typing import Annotated, cast
@@ -390,31 +391,41 @@ def logs(
     stdout: Annotated[bool, typer.Option("--stdout", help="Show only captured stdout.")] = False,
     stderr: Annotated[bool, typer.Option("--stderr", help="Show only captured stderr.")] = False,
     generation: Annotated[int | None, typer.Option("--generation", help="Filter to a session generation.")] = None,
+    follow: Annotated[bool, typer.Option("--follow", "-f", help="Stream output live until the session exits.")] = False,
 ) -> None:
     """Print captured stdout/stderr for a session."""
     if stdout and stderr:
         raise typer.BadParameter("--stdout and --stderr cannot be used together.")
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
+    state_dir = resolve_state_dir(cfg.paths.state_dir)
     try:
-        recover_sessions(conn)
-        session = _resolve_session_selector(SessionStore(conn), session_id)
-        events = EventStore(conn).list(session.session_id, generation=generation)
+        with closing(_open_db_or_exit(state_dir)) as conn:
+            recover_sessions(conn)
+            session = _resolve_session_selector(SessionStore(conn), session_id)
+            events = EventStore(conn).list(session.session_id, generation=generation)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
-    finally:
-        conn.close()
     wanted: set[str] = set()
     if not stderr:
         wanted.add(EVENT_RUNTIME_STDOUT)
     if not stdout:
         wanted.add(EVENT_RUNTIME_STDERR)
-    for event in events:
+
+    def _emit(event: dict[str, object]) -> None:
         if event["event_type"] in wanted:
             payload = cast("dict[str, str]", event["payload"])
-            print(payload["text"], end="")
+            print(payload["text"], end="", flush=follow)
+
+    for event in events:
+        _emit(event)
+    if not follow:
+        return
+    last_seq = cast("int", events[-1]["sequence"]) if events else -1
+    if session.state in TERMINAL_STATES and session.supervisor_pid is None:
+        return
+    _follow_events(session.session_id, state_dir, _emit, last_seq, generation=generation)
 
 
 _FOLLOW_POLL_INTERVAL = 0.25  # seconds between polls in events --follow
@@ -436,7 +447,14 @@ def _print_event(row: dict[str, object], json_flag: bool) -> None:
     )
 
 
-def _follow_events(session_id: str, state_dir: Path, json_flag: bool, last_seq: int) -> None:
+def _follow_events(
+    session_id: str,
+    state_dir: Path,
+    on_row: Callable[[dict[str, object]], None],
+    last_seq: int,
+    *,
+    generation: int | None = None,
+) -> None:
     """Poll for new events until the session reaches a terminal state with supervisor_pid cleared."""
     try:
         while True:
@@ -444,9 +462,9 @@ def _follow_events(session_id: str, state_dir: Path, json_flag: bool, last_seq: 
             with closing(_open_db_or_exit(state_dir)) as conn:
                 recover_sessions(conn)
                 session = SessionStore(conn).get(session_id)
-                rows = EventStore(conn).list(session_id, after_sequence=last_seq)
+                rows = EventStore(conn).list(session_id, after_sequence=last_seq, generation=generation)
             for row in rows:
-                _print_event(row, json_flag)
+                on_row(row)
             if rows:
                 last_seq = cast("int", rows[-1]["sequence"])
             if session is None or (session.state in TERMINAL_STATES and not rows and session.supervisor_pid is None):
@@ -483,7 +501,7 @@ def events(
         last_seq = cast("int", rows[-1]["sequence"]) if rows else -1
         if session.state in TERMINAL_STATES and session.supervisor_pid is None:
             return
-        _follow_events(session.session_id, state_dir, json_flag, last_seq)
+        _follow_events(session.session_id, state_dir, lambda row: _print_event(row, json_flag), last_seq)
         return
     if json_flag:
         print(json.dumps(rows))
