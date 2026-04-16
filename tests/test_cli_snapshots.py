@@ -47,16 +47,16 @@ def test_main_help() -> None:
 │                                                    exit.                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ repl       Start an interactive REPL session.                                │
-│ doctor     Check psoul environment and report status.                        │
-│ run        Launch a Python target as a managed session.                      │
-│ ps         List sessions.                                                    │
-│ status     Show session detail.                                              │
-│ logs       Print captured stdout/stderr for a session.                       │
-│ events     Print the event log for a session.                                │
-│ resources  Show the most recent resource sample for a session.               │
-│ version    Show psoul version.                                               │
-│ config     Show and manage configuration.                                    │
+│ repl     Start an interactive REPL session.                                  │
+│ doctor   Check psoul environment and report status.                          │
+│ run      Launch a Python target as a managed session.                        │
+│ ps       List sessions.                                                      │
+│ status   Show session detail.                                                │
+│ logs     Print captured stdout/stderr for a session.                         │
+│ events   Print the event log for a session.                                  │
+│ stats    Show the most recent resource sample for a session.                 │
+│ version  Show psoul version.                                                 │
+│ config   Show and manage configuration.                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 """)
