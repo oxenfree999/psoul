@@ -54,7 +54,7 @@ def test_main_help() -> None:
 │ status   Show session detail.                                                │
 │ logs     Print captured stdout/stderr for a session.                         │
 │ events   Print the event log for a session.                                  │
-│ stats    Show the most recent resource sample for a session.                 │
+│ stats    Show current resource usage (CPU, memory, disk, GPU if available).  │
 │ version  Show psoul version.                                                 │
 │ config   Show and manage configuration.                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
