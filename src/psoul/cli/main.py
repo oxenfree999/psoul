@@ -523,7 +523,7 @@ def stats(
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
     json_flag: Annotated[bool, typer.Option("--json", help="Output JSON instead of text.")] = False,
 ) -> None:
-    """Show the most recent resource sample for a session."""
+    """Show current resource usage (CPU, memory, disk, GPU if available)."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
     conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))

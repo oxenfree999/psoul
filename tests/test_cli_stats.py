@@ -113,3 +113,38 @@ def test_stats_no_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     result = runner.invoke(cli, ["stats", "empty"])
     assert result.exit_code == 1
     assert "Error: no resource samples found." in result.output
+
+
+def test_stats_renders_gpu_columns_when_populated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text and ``--json`` output both include GPU values when the row has GPU data."""
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    with closing(open_db(tmp_path)) as conn:
+        SessionStore(conn).create(
+            Session(
+                session_id="gpu-cli",
+                state=SessionState.exited,
+                launch_mode=LaunchMode.headless,
+                launch_time=datetime.now(UTC),
+                psoul_version=VERSION,
+            )
+        )
+        conn.execute(
+            "INSERT INTO resource_samples"
+            " (session_id, generation, timestamp,"
+            "  cpu_percent, memory_rss_mb, memory_vms_mb,"
+            "  disk_read_mb, disk_write_mb,"
+            "  gpu_utilization_pct, gpu_memory_used_mb, gpu_memory_total_mb,"
+            "  gpu_temperature_c, gpu_power_watts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("gpu-cli", 0, "2026-01-01T00:00:00", 5.0, 50.0, 200.0, 0.5, 1.0, 42.0, 2048.0, 8192.0, 65.0, 75.0),
+        )
+        conn.commit()
+    text_result = runner.invoke(cli, ["stats", "gpu-cli"])
+    assert text_result.exit_code == 0
+    assert "gpu_utilization_pct: 42.0" in text_result.output
+    assert "gpu_power_watts: 75.0" in text_result.output
+    json_result = runner.invoke(cli, ["stats", "gpu-cli", "--json"])
+    assert json_result.exit_code == 0
+    parsed = json.loads(json_result.output)
+    assert parsed["gpu_utilization_pct"] == 42.0
+    assert parsed["gpu_power_watts"] == 75.0

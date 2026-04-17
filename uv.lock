@@ -251,6 +251,7 @@ gpu = [
 [package.dev-dependencies]
 dev = [
     { name = "inline-snapshot" },
+    { name = "nvidia-ml-py" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -283,6 +284,7 @@ provides-extras = ["gpu"]
 [package.metadata.requires-dev]
 dev = [
     { name = "inline-snapshot", specifier = ">=0.32" },
+    { name = "nvidia-ml-py", specifier = ">=12.0" },
     { name = "pytest", specifier = ">=9.0" },
     { name = "pytest-cov", specifier = ">=7.0" },
     { name = "ruff", specifier = ">=0.8" },

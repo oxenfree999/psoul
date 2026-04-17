@@ -10,6 +10,7 @@ import psutil
 
 from psoul.core.db import open_db
 from psoul.core.events import EventStore
+from psoul.core.gpu import GpuReader
 
 EVENT_RESOURCE_TELEMETRY = "resource.telemetry"
 
@@ -70,8 +71,10 @@ class ResourceSampler:
             "INSERT INTO resource_samples"
             " (session_id, generation, timestamp,"
             "  cpu_percent, memory_rss_mb, memory_vms_mb,"
-            "  disk_read_mb, disk_write_mb)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "  disk_read_mb, disk_write_mb,"
+            "  gpu_utilization_pct, gpu_memory_used_mb, gpu_memory_total_mb,"
+            "  gpu_temperature_c, gpu_power_watts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 self._session_id,
                 self._generation,
@@ -81,6 +84,11 @@ class ResourceSampler:
                 metrics["memory_vms_mb"],
                 metrics["disk_read_mb"],
                 metrics["disk_write_mb"],
+                metrics.get("gpu_utilization_pct"),
+                metrics.get("gpu_memory_used_mb"),
+                metrics.get("gpu_memory_total_mb"),
+                metrics.get("gpu_temperature_c"),
+                metrics.get("gpu_power_watts"),
             ),
         )
         event_store.append(
@@ -99,11 +107,12 @@ class ResourceSampler:
         background thread.  Exits cleanly on ``stop()`` or when the
         process disappears.
         """
-        with closing(open_db(self._state_dir)) as conn:
+        with closing(open_db(self._state_dir)) as conn, GpuReader() as gpu:
             event_store = EventStore(conn)
             while not self._stop_event.is_set():
                 try:
                     metrics = _collect(self._process)
+                    metrics.update(gpu.read())
                     self._persist(metrics, conn, event_store)
                 except psutil.NoSuchProcess:
                     break
