@@ -47,16 +47,18 @@ def test_main_help() -> None:
 │                                                    exit.                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ repl     Start an interactive REPL session.                                  │
-│ doctor   Check psoul environment and report status.                          │
-│ run      Launch a Python target as a managed session.                        │
-│ ps       List sessions.                                                      │
-│ status   Show session detail.                                                │
-│ logs     Print captured stdout/stderr for a session.                         │
-│ events   Print the event log for a session.                                  │
-│ stats    Show current resource usage (CPU, memory, disk, GPU if available).  │
-│ version  Show psoul version.                                                 │
-│ config   Show and manage configuration.                                      │
+│ repl       Start an interactive REPL session.                                │
+│ doctor     Check psoul environment and report status.                        │
+│ run        Launch a Python target as a managed session.                      │
+│ ps         List sessions.                                                    │
+│ status     Show session detail.                                              │
+│ logs       Print captured stdout/stderr for a session.                       │
+│ events     Print the event log for a session.                                │
+│ stats      Show current resource usage (CPU, memory, disk, GPU if            │
+│            available).                                                       │
+│ artifacts  List files produced by a session (plots, checkpoints, exports).   │
+│ version    Show psoul version.                                               │
+│ config     Show and manage configuration.                                    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 """)

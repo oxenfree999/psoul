@@ -20,6 +20,7 @@ from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.logging import configure_logging, resolve_log_level
 from psoul.cli.repl import run_repl
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
+from psoul.core.artifacts import ArtifactStore
 from psoul.core.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
 from psoul.core.db import DB_NAME, open_db, resolve_state_dir
 from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
@@ -556,6 +557,38 @@ def stats(
     for key, value in sample.items():
         if value is not None:
             print(f"{key}: {value}")
+
+
+@cli.command()
+def artifacts(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+) -> None:
+    """List files produced by a session (plots, checkpoints, exports)."""
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    state_dir = resolve_state_dir(cfg.paths.state_dir)
+    try:
+        with closing(_open_db_or_exit(state_dir)) as conn:
+            recover_sessions(conn)
+            session = _resolve_session_selector(SessionStore(conn), session_id)
+            rows = ArtifactStore(conn).list(session.session_id)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    for row in rows:
+        mime_type = "" if row["mime_type"] is None else row["mime_type"]
+        size_bytes = "" if row["size_bytes"] is None else row["size_bytes"]
+        print(
+            row["registered_at"],
+            row["name"],
+            row["path"],
+            mime_type,
+            size_bytes,
+            row["source"],
+            row["retention_class"],
+            sep="\t",
+        )
 
 
 @cli.command()
