@@ -11,6 +11,7 @@ from pathlib import Path
 
 import click
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from psoul.cli.main import cli
@@ -109,8 +110,7 @@ def test_as_cmd_uses_configured_python_path(target_type: TargetType, target: str
     assert t.as_cmd() == [*expected_prefix, "--flag"]
 
 
-def test_build_launch_request_freezes_tags(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.core.launch.sys.stdin.isatty", lambda: False)
+def test_build_launch_request_freezes_tags() -> None:
     tags = {"env": "dev"}
     req = build_launch_request(
         target="x.py",
@@ -128,23 +128,19 @@ def test_build_launch_request_freezes_tags(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.parametrize(
-    ("isatty", "headless", "default_mode", "expected"),
+    ("headless", "default_mode", "expected"),
     [
-        (False, False, LaunchMode.attached, LaunchMode.headless),
-        (True, True, LaunchMode.attached, LaunchMode.headless),
-        (True, False, LaunchMode.headless, LaunchMode.headless),
-        (True, False, LaunchMode.attached, LaunchMode.attached),
+        (True, LaunchMode.attached, LaunchMode.headless),
+        (False, LaunchMode.headless, LaunchMode.headless),
+        (False, LaunchMode.attached, LaunchMode.attached),
     ],
-    ids=["no-tty-forces-headless", "flag-forces-headless", "default-headless", "default-attached"],
+    ids=["flag-forces-headless", "default-headless", "default-attached"],
 )
 def test_build_launch_request_resolves_mode(
-    monkeypatch: pytest.MonkeyPatch,
-    isatty: bool,
     headless: bool,
     default_mode: LaunchMode,
     expected: LaunchMode,
 ) -> None:
-    monkeypatch.setattr("psoul.core.launch.sys.stdin.isatty", lambda: isatty)
     req = build_launch_request(
         target="x.py",
         module=None,
@@ -158,8 +154,7 @@ def test_build_launch_request_resolves_mode(
     assert req.launch_mode == expected
 
 
-def test_build_launch_request_threads_python_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.core.launch.sys.stdin.isatty", lambda: True)
+def test_build_launch_request_threads_python_path() -> None:
     req = build_launch_request(
         target="x.py",
         module=None,
@@ -171,6 +166,22 @@ def test_build_launch_request_threads_python_path(monkeypatch: pytest.MonkeyPatc
         default_mode=LaunchMode.attached,
     )
     assert req.target.python_path == Path("/fake/python")
+
+
+def test_build_launch_request_stays_attached_when_stdin_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: non-TTY stdin does not auto-promote attached launches to headless."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    req = build_launch_request(
+        target="x.py",
+        module=None,
+        extra_args=[],
+        name="a-b-c-d",
+        headless=False,
+        tags=None,
+        python_path=Path(sys.executable),
+        default_mode=LaunchMode.attached,
+    )
+    assert req.launch_mode == LaunchMode.attached
 
 
 def _script_request(
@@ -363,6 +374,30 @@ def test_headless_cli_prints_record_and_exits(tmp_path: Path, monkeypatch: pytes
     assert record["supervisor_pid"] > 0
 
 
+def test_run_config_attached_beats_piped_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: `config.launch.mode = "attached"` wins over non-TTY stdin through the CLI.
+
+    Relies on CliRunner's default non-TTY stdin. `sys.stdin.isatty()` is `False` inside
+    `runner.invoke(...)` without extra setup.
+    """
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    config = tmp_path / "psoul.toml"
+    config.write_text('[launch]\nmode = "attached"\n')
+    script = tmp_path / "noop.py"
+    script.write_text("pass")
+    captured: dict[str, LaunchMode] = {}
+
+    def capture(request: LaunchRequest, *_args: object) -> None:
+        captured["mode"] = request.launch_mode
+        raise typer.Exit(0)
+
+    monkeypatch.setattr("psoul.cli.main.launch_attached", capture)
+    monkeypatch.setattr("psoul.cli.main.launch_headless", capture)
+    result = runner.invoke(cli, ["--config", str(config), "run", str(script)])
+    assert result.exit_code == 0
+    assert captured["mode"] == LaunchMode.attached
+
+
 def test_duplicate_session_id_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     _store_session(tmp_path, "dup-test")
@@ -455,7 +490,6 @@ def test_launch_to_query_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert detail["state"] == "failed"
 
 
-@requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_bare_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul script.py`` is equivalent to ``psoul run script.py``."""
@@ -464,12 +498,12 @@ def test_bare_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     script.write_text("pass")
     result = runner.invoke(cli, [str(script)])
     assert result.exit_code == 0
-    record = json.loads(result.output)
-    assert record["session_id"]
-    assert record["state"] == "starting"
+    records = json.loads(runner.invoke(cli, ["ps", "--json"]).output)
+    assert len(records) == 1
+    assert records[0]["target"] == str(script)
+    assert records[0]["state"] == "exited"
 
 
-@requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_bare_file_with_global_verbose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul -v script.py`` — global options parsed before disambiguation."""
@@ -478,8 +512,8 @@ def test_bare_file_with_global_verbose(tmp_path: Path, monkeypatch: pytest.Monke
     script.write_text("pass")
     result = runner.invoke(cli, ["-v", str(script)])
     assert result.exit_code == 0
-    record = json.loads(result.output)
-    assert record["session_id"]
+    records = json.loads(runner.invoke(cli, ["ps", "--json"]).output)
+    assert len(records) == 1
 
 
 def test_bare_nonexistent_file_errors_unknown_command(tmp_path: Path) -> None:
@@ -489,7 +523,6 @@ def test_bare_nonexistent_file_errors_unknown_command(tmp_path: Path) -> None:
     assert "No such command" in click.unstyle(result.output)
 
 
-@requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_bare_file_passes_extra_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul script.py extra --child-flag`` passes trailing tokens to run."""
@@ -498,8 +531,9 @@ def test_bare_file_passes_extra_args(tmp_path: Path, monkeypatch: pytest.MonkeyP
     script.write_text("pass")
     result = runner.invoke(cli, [str(script), "extra", "--child-flag"])
     assert result.exit_code == 0
-    sid = json.loads(result.output)["session_id"]
-    detail = json.loads(runner.invoke(cli, ["status", sid, "--json"]).output)
+    records = json.loads(runner.invoke(cli, ["ps", "--json"]).output)
+    assert len(records) == 1
+    detail = json.loads(runner.invoke(cli, ["status", records[0]["session_id"], "--json"]).output)
     assert detail["target_args"] == ["extra", "--child-flag"]
 
 

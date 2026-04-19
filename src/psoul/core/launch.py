@@ -2,7 +2,6 @@
 
 import os
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -113,8 +112,8 @@ def build_launch_request(
 ) -> LaunchRequest:
     """Assemble a frozen LaunchRequest from CLI inputs.
 
-    The launch mode is headless when ``--headless`` is set or stdin is
-    not a TTY; otherwise *default_mode* applies.
+    The launch mode is headless when ``--headless`` is set. Otherwise,
+    *default_mode* applies.
 
     Args:
         target (str | None): Script path.
@@ -124,17 +123,16 @@ def build_launch_request(
         headless (bool): Force headless launch mode.
         tags (dict[str, str] | None): Session tags from ``--tag`` flags.
         python_path (Path): Python interpreter that runs the target.
-        default_mode (LaunchMode): Mode used when ``--headless`` is unset and stdin is a TTY.
+        default_mode (LaunchMode): Mode used when ``--headless`` is unset.
 
     Returns:
         LaunchRequest: Frozen snapshot of everything needed to create a session.
 
     """
-    forced_headless = headless or not sys.stdin.isatty()
     launch_target = parse_launch_target(target=target, module=module, extra_args=extra_args, python_path=python_path)
     return LaunchRequest(
         session_id=resolve_session_id(name),
-        launch_mode=LaunchMode.headless if forced_headless else default_mode,
+        launch_mode=LaunchMode.headless if headless else default_mode,
         target=launch_target,
         cwd=Path.cwd(),
         tags=MappingProxyType(dict(tags)) if tags is not None else None,
