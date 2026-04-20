@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import time
 from contextlib import closing
 from datetime import UTC, datetime
@@ -19,6 +20,13 @@ from psoul.core.events import EventStore
 from psoul.core.session import LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
+
+if sys.platform == "win32":
+    pytest.skip(
+        "test_cli_control.py exercises Unix-only psoul stop / kill semantics. "
+        "The platform-rejection branch is covered on Unix via monkeypatched sys.platform.",
+        allow_module_level=True,
+    )
 
 runner = CliRunner()
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")

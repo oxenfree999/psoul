@@ -338,11 +338,16 @@ def run(
         conn.close()
 
 
-def _deliver_control_signal(ctx: typer.Context, selector: str, *, sig: int, verb: str) -> None:
-    """Resolve *selector*, validate state, and send *sig* to the supervisor. Prints error or success."""
+def _deliver_control_signal(ctx: typer.Context, selector: str, *, signame: str, verb: str) -> None:
+    """Resolve *selector*, validate state, and send the signal named *signame* to the supervisor.
+
+    *signame* is resolved to a `signal.Signals` value only after the platform
+    check, since names like ``SIGUSR1`` and ``SIGUSR2`` do not exist on Windows.
+    """
     if sys.platform == "win32":
         print(f"Error: {verb} is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
         raise typer.Exit(ExitCode.USAGE)
+    sig = getattr(signal, signame)
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
     with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
@@ -387,7 +392,7 @@ def stop(
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
 ) -> None:
     """Stop a running headless session. Escalates to SIGKILL after the stop_timeout grace period."""
-    _deliver_control_signal(ctx, session_id, sig=signal.SIGUSR1, verb="stop")
+    _deliver_control_signal(ctx, session_id, signame="SIGUSR1", verb="stop")
 
 
 @cli.command()
@@ -396,7 +401,7 @@ def kill(
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
 ) -> None:
     """Kill a running headless session immediately (no grace period)."""
-    _deliver_control_signal(ctx, session_id, sig=signal.SIGUSR2, verb="kill")
+    _deliver_control_signal(ctx, session_id, signame="SIGUSR2", verb="kill")
 
 
 @cli.command()
