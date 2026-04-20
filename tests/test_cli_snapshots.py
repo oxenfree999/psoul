@@ -50,6 +50,9 @@ def test_main_help() -> None:
 │ repl       Start an interactive REPL session.                                │
 │ doctor     Check psoul environment and report status.                        │
 │ run        Launch a Python target as a managed session.                      │
+│ stop       Stop a running headless session. Escalates to SIGKILL after the   │
+│            stop_timeout grace period.                                        │
+│ kill       Kill a running headless session immediately (no grace period).    │
 │ ps         List sessions.                                                    │
 │ status     Show session detail.                                              │
 │ logs       Print captured stdout/stderr for a session.                       │
@@ -114,6 +117,45 @@ def test_events_help() -> None:
 │ --json              Output JSON instead of text, as an array by default, or  │
 │                     NDJSON with --follow.                                    │
 │ --help    -h        Show this message and exit.                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_stop_help() -> None:
+    result = runner.invoke(cli, ["stop", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul stop [OPTIONS] SESSION_ID                                         \n\
+                                                                                \n\
+ Stop a running headless session. Escalates to SIGKILL after the stop_timeout   \n\
+ grace period.                                                                  \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id      TEXT  Session ID or unique prefix. [required]           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_kill_help() -> None:
+    result = runner.invoke(cli, ["kill", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul kill [OPTIONS] SESSION_ID                                         \n\
+                                                                                \n\
+ Kill a running headless session immediately (no grace period).                 \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id      TEXT  Session ID or unique prefix. [required]           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 """)

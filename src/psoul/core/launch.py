@@ -1,6 +1,7 @@
 """Session launch: target parsing, request building, and process lifecycle."""
 
 import os
+import selectors
 import subprocess
 import threading
 import time
@@ -12,10 +13,11 @@ from types import MappingProxyType
 
 import psutil
 
+from psoul.core import control
 from psoul.core.db import open_db
-from psoul.core.events import EventStore
+from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.names import generate_session_id
-from psoul.core.output import drain_output
+from psoul.core.output import READ_CHUNK_SIZE, drain_output
 from psoul.core.provenance import gather
 from psoul.core.resources import ResourceSampler
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType, validate_session_id
@@ -158,7 +160,13 @@ def _create_session(request: LaunchRequest, store: SessionStore) -> Session:
     return store.create(session)
 
 
-def launch_headless(request: LaunchRequest, store: SessionStore, state_dir: Path) -> tuple[Session, int]:
+def launch_headless(
+    request: LaunchRequest,
+    store: SessionStore,
+    state_dir: Path,
+    *,
+    stop_timeout_seconds: float = 10.0,
+) -> tuple[Session, int]:
     """Fork a background supervisor and return the session in starting state.
 
     The forked child becomes the supervisor — it outlives the CLI
@@ -168,6 +176,9 @@ def launch_headless(request: LaunchRequest, store: SessionStore, state_dir: Path
         request (LaunchRequest): Resolved target, session ID, and launch options.
         store (SessionStore): Store for persisting the session.
         state_dir (Path): State directory for the supervisor's database connection.
+        stop_timeout_seconds (float): Seconds between SIGTERM delivery and the
+            SIGKILL escalation when a stop command is in flight. Default
+            10.0 matches the ``process.stop_timeout = "10s"`` config default.
 
     Returns:
         tuple[Session, int]: The new session and the supervisor's PID.
@@ -184,16 +195,116 @@ def launch_headless(request: LaunchRequest, store: SessionStore, state_dir: Path
     if child_pid == 0:
         os.setsid()
         store.conn.close()
-        _supervise(request, state_dir)
+        _supervise(request, state_dir, stop_timeout_seconds=stop_timeout_seconds)
         os._exit(0)
     return session, child_pid
 
 
 _SAMPLE_INTERVAL = 2.0  # seconds between resource samples
+_SUPERVISE_TICK = 0.1  # seconds per supervise-loop iteration
 
 
-def _supervise(request: LaunchRequest, state_dir: Path) -> None:
-    """Background supervisor: spawn target, capture output, sample resources, wait, update session state."""
+def _drain_tick(
+    selector: selectors.DefaultSelector,
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    timeout: float,
+) -> bool:
+    """Read one selector pass of stdio chunks into the event log.
+
+    Returns ``True`` when at least one chunk was read. Unregisters a
+    stream on EOF so the caller can detect pipe closure via
+    ``selector.get_map()``.
+    """
+    any_read = False
+    for key, _mask in selector.select(timeout=timeout):
+        chunk = os.read(key.fd, READ_CHUNK_SIZE)
+        if not chunk:
+            selector.unregister(key.fileobj)
+            continue
+        event_store.append(
+            session_id=session_id,
+            event_type=str(key.data),
+            payload={"text": chunk.decode("utf-8", errors="replace")},
+            generation=generation,
+            commit=False,
+        )
+        any_read = True
+    event_store.conn.commit()
+    return any_read
+
+
+def _supervise_loop(
+    proc: subprocess.Popen[bytes],
+    *,
+    session_id: str,
+    event_store: EventStore,
+    generation: int,
+    store: SessionStore,
+    control_state: control.ControlState,
+    stop_timeout_seconds: float,
+) -> None:
+    """Tick-based supervise loop: drain stdio, dispatch signal flags, watch proc exit.
+
+    Runs on the supervisor's main thread so signal handlers installed by
+    ``control.install_handlers`` can flip request flags and have them
+    serviced on the same thread each tick. After ``proc.poll()`` reports
+    exit, any still-readable stdio is drained before returning.
+    """
+    with selectors.DefaultSelector() as selector:
+        if proc.stdout is not None:
+            selector.register(proc.stdout, selectors.EVENT_READ, EVENT_RUNTIME_STDOUT)
+        if proc.stderr is not None:
+            selector.register(proc.stderr, selectors.EVENT_READ, EVENT_RUNTIME_STDERR)
+        while proc.poll() is None:
+            _drain_tick(selector, event_store, session_id, generation, timeout=_SUPERVISE_TICK)
+            if control_state.stop_requested:
+                control.handle_stop(
+                    control_state, proc, event_store, session_id, generation, stop_timeout_seconds, store
+                )
+            if control_state.kill_requested:
+                control.handle_kill(control_state, proc, event_store, session_id, generation, store)
+            control.check_escalation(control_state, proc)
+        while selector.get_map() and _drain_tick(
+            selector, event_store, session_id, generation, timeout=_SUPERVISE_TICK
+        ):
+            pass
+
+
+def _finalize_exit(
+    proc: subprocess.Popen[bytes],
+    session_id: str,
+    store: SessionStore,
+    start_monotonic: float,
+) -> Session:
+    """Record the result row and transition the session to ``exited`` or ``failed``.
+
+    If the session is already in ``stopping`` (because ``handle_stop`` or
+    ``handle_kill`` has run), the intermediate ``running → stopping``
+    transition is skipped to avoid a ``stopping → stopping`` error.
+    """
+    duration = time.monotonic() - start_monotonic
+    outcome = "exited" if proc.returncode is not None and proc.returncode == 0 else "failed"
+    final_state = SessionState.exited if proc.returncode == 0 else SessionState.failed
+    current = store.get(session_id)
+    try:
+        store.record_result(
+            session_id=session_id,
+            outcome=outcome,
+            exit_code=proc.returncode,
+            end_time=datetime.now(UTC),
+            duration_seconds=duration,
+        )
+    finally:
+        if current is not None and current.state != SessionState.stopping:
+            store.update(session_id, state=SessionState.stopping)
+        final = store.update(session_id, state=final_state)
+    return final
+
+
+def _supervise(request: LaunchRequest, state_dir: Path, *, stop_timeout_seconds: float) -> None:
+    """Background supervisor: spawn target in its own pgroup, serve control signals, finalize on child exit."""
     conn = open_db(state_dir)
     try:
         sup_store = SessionStore(conn)
@@ -204,7 +315,10 @@ def _supervise(request: LaunchRequest, state_dir: Path) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
+        control_state = control.ControlState()
+        control.install_handlers(control_state)
         session = sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
         sampler: ResourceSampler | None = None
         sampler_thread: threading.Thread | None = None
@@ -214,20 +328,25 @@ def _supervise(request: LaunchRequest, state_dir: Path) -> None:
             sampler_thread = threading.Thread(target=sampler.run, args=(_SAMPLE_INTERVAL,), daemon=True)
             sampler_thread.start()
         except psutil.NoSuchProcess:
-            pass  # child already exited; skip sampling, wait_for_exit still finalizes
+            pass  # child already exited; skip sampling, supervise loop still finalizes
+        start_mono = time.monotonic()
         try:
-            wait_for_exit(
-                request.session_id,
+            _supervise_loop(
                 proc,
-                sup_store,
+                session_id=request.session_id,
                 event_store=event_store,
                 generation=session.generation,
+                store=sup_store,
+                control_state=control_state,
+                stop_timeout_seconds=stop_timeout_seconds,
             )
+            control.emit_terminal_events(control_state, event_store, request.session_id, session.generation)
         finally:
             if sampler is not None:
                 sampler.stop()
             if sampler_thread is not None:
                 sampler_thread.join()
+        _finalize_exit(proc, request.session_id, sup_store, start_mono)
         sup_store.update(request.session_id, supervisor_pid=None)
     finally:
         conn.close()

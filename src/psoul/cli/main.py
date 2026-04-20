@@ -2,6 +2,8 @@
 
 import dataclasses
 import json
+import os
+import signal
 import sqlite3
 import sys
 import time
@@ -23,6 +25,7 @@ from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, reso
 from psoul.core.artifacts import ArtifactStore
 from psoul.core.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
 from psoul.core.db import DB_NAME, open_db, resolve_state_dir
+from psoul.core.duration import parse_duration
 from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
 from psoul.core.recovery import recover_sessions
@@ -316,7 +319,8 @@ def run(
             print(f"Error: session ID already exists: {request.session_id}", file=sys.stderr)
             raise typer.Exit(ExitCode.ERROR)
         if request.launch_mode == LaunchMode.headless:
-            session, supervisor_pid = launch_headless(request, store, state_dir)
+            stop_timeout = parse_duration(cfg.process.stop_timeout).total_seconds()
+            session, supervisor_pid = launch_headless(request, store, state_dir, stop_timeout_seconds=stop_timeout)
             print(
                 json.dumps(
                     {"session_id": session.session_id, "state": session.state.value, "supervisor_pid": supervisor_pid}
@@ -332,6 +336,72 @@ def run(
         raise typer.Exit(ExitCode.ERROR) from None
     finally:
         conn.close()
+
+
+def _deliver_control_signal(ctx: typer.Context, selector: str, *, signame: str, verb: str) -> None:
+    """Resolve *selector*, validate state, and send the signal named *signame* to the supervisor.
+
+    *signame* is resolved to a `signal.Signals` value only after the platform
+    check, since names like ``SIGUSR1`` and ``SIGUSR2`` do not exist on Windows.
+    """
+    if sys.platform == "win32":
+        print(f"Error: {verb} is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE)
+    sig = getattr(signal, signame)
+    state: GlobalState = ctx.obj
+    cfg = _load_resolved_config(state.config_override)
+    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+        recover_sessions(conn)
+        try:
+            session = _resolve_session_selector(SessionStore(conn), selector)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE) from None
+        if session.launch_mode != LaunchMode.headless:
+            msg = f"{verb} requires a headless session (this session is attached): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state == SessionState.orphaned:
+            print(f"Error: session is orphaned: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state == SessionState.stopping:
+            print(f"Error: session is already stopping: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state != SessionState.running:
+            msg = f"session is not running (state: {session.state}): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.supervisor_pid is None:
+            print(f"Error: session has no supervisor: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR)
+        try:
+            os.kill(session.supervisor_pid, sig)
+        except ProcessLookupError:
+            print(f"Error: supervisor process is not running: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from None
+        except PermissionError:
+            msg = f"permission denied signalling supervisor (PID={session.supervisor_pid}): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from None
+        print(f"Sent {verb} to {session.session_id}.")
+
+
+@cli.command()
+def stop(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+) -> None:
+    """Stop a running headless session. Escalates to SIGKILL after the stop_timeout grace period."""
+    _deliver_control_signal(ctx, session_id, signame="SIGUSR1", verb="stop")
+
+
+@cli.command()
+def kill(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+) -> None:
+    """Kill a running headless session immediately (no grace period)."""
+    _deliver_control_signal(ctx, session_id, signame="SIGUSR2", verb="kill")
 
 
 @cli.command()

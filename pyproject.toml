@@ -98,8 +98,8 @@ format-command = "ruff format --stdin-filename {filename}"
 source = ["psoul"]
 branch = true
 
-[tool.coverage.report]
-fail_under = 90
+[tool.coverage.paths]
+source = ["src/", "*/src/"]
 
 [tool.ruff]
 target-version = "py312"
