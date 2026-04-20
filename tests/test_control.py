@@ -38,6 +38,9 @@ from psoul.core.session import LaunchMode, Session, SessionState, TargetType
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
+if sys.platform == "win32":
+    pytest.skip("test_control.py requires Unix signals (SIGKILL / SIGUSR1 / SIGUSR2)", allow_module_level=True)
+
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
 
 
