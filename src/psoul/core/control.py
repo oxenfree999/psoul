@@ -30,6 +30,8 @@ COMMAND_COMPLETED = "command.completed"
 
 STOP_COMMAND = "stop"
 KILL_COMMAND = "kill"
+PAUSE_COMMAND = "pause"
+RESUME_COMMAND = "resume"
 
 OUTCOME_OK = "ok"
 OUTCOME_ESCALATED = "escalated"
@@ -192,7 +194,7 @@ def handle_stop(
         state.stop_requested = False
         return
     current = store.get(session_id)
-    if current is None or current.state != SessionState.running:
+    if current is None or current.state not in {SessionState.running, SessionState.suspended}:
         _emit_noop_pair(event_store, session_id, generation, STOP_COMMAND, mid, sent_at)
         state.stop_requested = False
         return
@@ -270,7 +272,7 @@ def handle_kill(
         state.kill_requested = False
         return
     current = store.get(session_id)
-    if current is None or current.state != SessionState.running:
+    if current is None or current.state not in {SessionState.running, SessionState.suspended}:
         _emit_noop_pair(event_store, session_id, generation, KILL_COMMAND, mid, sent_at)
         state.kill_requested = False
         return
@@ -285,6 +287,47 @@ def handle_kill(
         _emit_completed(event_store, session_id, generation, KILL_COMMAND, mid, OUTCOME_NOOP, 0)
         state.completion_emitted = True
     state.kill_requested = False
+
+
+def handle_pause_observed(
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    store: SessionStore,
+) -> None:
+    """Transition ``running`` to ``suspended`` and emit paired pause events.
+
+    When the row is not ``running``, emits nothing so a concurrent
+    ``handle_stop`` or ``handle_kill`` can own the terminal path.
+    """
+    current = store.get(session_id)
+    if current is None or current.state != SessionState.running:
+        return
+    store.update(session_id, state=SessionState.suspended)
+    mid = _new_message_id()
+    sent_at = _now_iso()
+    _emit_accepted(event_store, session_id, generation, PAUSE_COMMAND, mid, sent_at)
+    _emit_completed(event_store, session_id, generation, PAUSE_COMMAND, mid, OUTCOME_OK, 0)
+
+
+def handle_resume_observed(
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    store: SessionStore,
+) -> None:
+    """Transition ``suspended`` to ``running`` and emit paired resume events.
+
+    When the row is not ``suspended``, emits nothing.
+    """
+    current = store.get(session_id)
+    if current is None or current.state != SessionState.suspended:
+        return
+    store.update(session_id, state=SessionState.running)
+    mid = _new_message_id()
+    sent_at = _now_iso()
+    _emit_accepted(event_store, session_id, generation, RESUME_COMMAND, mid, sent_at)
+    _emit_completed(event_store, session_id, generation, RESUME_COMMAND, mid, OUTCOME_OK, 0)
 
 
 def check_escalation(state: ControlState, proc: SupervisedProc) -> None:

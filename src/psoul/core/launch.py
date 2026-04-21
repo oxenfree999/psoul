@@ -235,6 +235,30 @@ def _drain_tick(
     return any_read
 
 
+def _poll_child_status(proc: subprocess.Popen[bytes]) -> str | None:
+    """Return the child's status change as ``"stopped"``, ``"continued"``, ``"exited"``, or ``None``.
+
+    On ``"exited"``, sets ``proc.returncode`` to the child's exit code.
+    """
+    try:
+        wait_pid, sts = os.waitpid(proc.pid, os.WNOHANG | os.WUNTRACED | os.WCONTINUED)
+    except ChildProcessError:
+        return None
+    if wait_pid == 0:
+        return None
+    if os.WIFSTOPPED(sts):
+        return "stopped"
+    if os.WIFCONTINUED(sts):
+        return "continued"
+    if os.WIFEXITED(sts):
+        proc.returncode = os.WEXITSTATUS(sts)
+    elif os.WIFSIGNALED(sts):
+        proc.returncode = -os.WTERMSIG(sts)
+    else:
+        return None
+    return "exited"
+
+
 def _supervise_loop(
     proc: subprocess.Popen[bytes],
     *,
@@ -259,6 +283,11 @@ def _supervise_loop(
             selector.register(proc.stderr, selectors.EVENT_READ, EVENT_RUNTIME_STDERR)
         while proc.poll() is None:
             _drain_tick(selector, event_store, session_id, generation, timeout=_SUPERVISE_TICK)
+            status_change = _poll_child_status(proc)
+            if status_change == "stopped":
+                control.handle_pause_observed(event_store, session_id, generation, store)
+            elif status_change == "continued":
+                control.handle_resume_observed(event_store, session_id, generation, store)
             if control_state.stop_requested:
                 control.handle_stop(
                     control_state, proc, event_store, session_id, generation, stop_timeout_seconds, store
