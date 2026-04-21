@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Annotated, cast
 
 import click
+import psutil
 import tomlkit.exceptions
 import typer
 from typer.core import TyperGroup
@@ -367,8 +368,8 @@ def _deliver_control_signal(ctx: typer.Context, selector: str, *, signame: str, 
         if session.state == SessionState.stopping:
             print(f"Error: session is already stopping: {session.session_id}", file=sys.stderr)
             raise typer.Exit(ExitCode.USAGE)
-        if session.state != SessionState.running:
-            msg = f"session is not running (state: {session.state}): {session.session_id}"
+        if session.state not in {SessionState.running, SessionState.suspended}:
+            msg = f"session is not running or suspended (state: {session.state}): {session.session_id}"
             print(f"Error: {msg}", file=sys.stderr)
             raise typer.Exit(ExitCode.USAGE)
         if session.supervisor_pid is None:
@@ -391,7 +392,7 @@ def stop(
     ctx: typer.Context,
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
 ) -> None:
-    """Stop a running headless session. Escalates to SIGKILL after the stop_timeout grace period."""
+    """Stop a running or suspended headless session. Escalates to SIGKILL after the stop_timeout grace period."""
     _deliver_control_signal(ctx, session_id, signame="SIGUSR1", verb="stop")
 
 
@@ -400,8 +401,95 @@ def kill(
     ctx: typer.Context,
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
 ) -> None:
-    """Kill a running headless session immediately (no grace period)."""
+    """Kill a running or suspended headless session immediately (no grace period)."""
     _deliver_control_signal(ctx, session_id, signame="SIGUSR2", verb="kill")
+
+
+def _resolve_child_pid(supervisor_pid: int, session_id: str) -> int:
+    """Return the single managed child's PID, or exit with a clean error message."""
+    try:
+        children = psutil.Process(supervisor_pid).children()
+    except psutil.NoSuchProcess:
+        print(f"Error: supervisor process is not running: {session_id}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from None
+    if len(children) != 1:
+        print(f"Error: supervisor has no managed child: {session_id}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR)
+    return children[0].pid
+
+
+def _deliver_child_pgroup_signal(
+    ctx: typer.Context,
+    selector: str,
+    *,
+    signame: str,
+    verb: str,
+    accept_state: SessionState,
+) -> None:
+    """Resolve *selector*, validate state, and send the signal named *signame* to the child's process group.
+
+    *signame* is resolved to a `signal.Signals` value only after the platform
+    check, since names like ``SIGSTOP`` and ``SIGCONT`` do not exist on Windows.
+    """
+    if sys.platform == "win32":
+        print(f"Error: {verb} is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE)
+    sig = getattr(signal, signame)
+    state: GlobalState = ctx.obj
+    cfg = _load_resolved_config(state.config_override)
+    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+        recover_sessions(conn)
+        try:
+            session = _resolve_session_selector(SessionStore(conn), selector)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE) from None
+        if session.launch_mode != LaunchMode.headless:
+            msg = f"{verb} requires a headless session (this session is attached): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state == SessionState.orphaned:
+            print(f"Error: session is orphaned: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state == SessionState.stopping:
+            print(f"Error: session is already stopping: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state != accept_state:
+            msg = f"session is not {accept_state.value} (state: {session.state}): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.supervisor_pid is None:
+            print(f"Error: session has no supervisor: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR)
+        child_pid = _resolve_child_pid(session.supervisor_pid, session.session_id)
+        try:
+            os.killpg(child_pid, sig)
+        except ProcessLookupError:
+            print(f"session's child has already exited: {session.session_id}")
+            return
+        except PermissionError:
+            msg = f"permission denied signalling child (PID={child_pid}): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from None
+        print(f"Sent {verb} to {session.session_id}.")
+
+
+@cli.command()
+def pause(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+) -> None:
+    """Freeze a running headless session (SIGSTOP)."""
+    _deliver_child_pgroup_signal(ctx, session_id, signame="SIGSTOP", verb="pause", accept_state=SessionState.running)
+
+
+@cli.command()
+def resume(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+) -> None:
+    """Unfreeze a suspended headless session (SIGCONT)."""
+    _deliver_child_pgroup_signal(ctx, session_id, signame="SIGCONT", verb="resume", accept_state=SessionState.suspended)
 
 
 @cli.command()

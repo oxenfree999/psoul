@@ -2,6 +2,7 @@
 
 import os
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -20,6 +21,8 @@ from psoul.core.control import (
     OUTCOME_ESCALATED,
     OUTCOME_NOOP,
     OUTCOME_OK,
+    PAUSE_COMMAND,
+    RESUME_COMMAND,
     STOP_COMMAND,
     ControlState,
     PendingCommand,
@@ -28,12 +31,14 @@ from psoul.core.control import (
     check_escalation,
     emit_terminal_events,
     handle_kill,
+    handle_pause_observed,
+    handle_resume_observed,
     handle_stop,
     install_handlers,
 )
 from psoul.core.db import open_db
 from psoul.core.events import EventStore
-from psoul.core.launch import LaunchRequest, LaunchTarget, launch_headless
+from psoul.core.launch import LaunchRequest, LaunchTarget, _poll_child_status, launch_headless
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
@@ -44,15 +49,19 @@ if sys.platform == "win32":
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
 
 
-def _wait_until_running(store: SessionStore, session_id: str, timeout: float = 3.0) -> None:
+def _wait_for_state(store: SessionStore, session_id: str, target: SessionState, timeout: float = 3.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         session = store.get(session_id)
-        if session is not None and session.state == SessionState.running:
+        if session is not None and session.state == target:
             return
         time.sleep(0.02)
-    msg = f"session {session_id} did not reach running within {timeout}s"
+    msg = f"session {session_id} did not reach {target.value} within {timeout}s"
     raise RuntimeError(msg)
+
+
+def _wait_until_running(store: SessionStore, session_id: str, timeout: float = 3.0) -> None:
+    _wait_for_state(store, session_id, SessionState.running, timeout)
 
 
 def _wait_for_path(path: Path, timeout: float) -> None:
@@ -202,6 +211,113 @@ def test_handler_happy_path_signals_pgroup_and_records_pending(
     assert state.stop_requested is False
     assert state.kill_requested is False
     session = store.get("sesh-x")
+    assert session is not None
+    assert session.state == SessionState.stopping
+
+
+def test_handle_pause_observed_transitions_running_to_suspended_and_emits_pair(
+    stores: tuple[SessionStore, EventStore],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-pause")
+    handle_pause_observed(event_store, "sesh-pause", 0, store)
+    session = store.get("sesh-pause")
+    assert session is not None
+    assert session.state == SessionState.suspended
+    events = event_store.list("sesh-pause")
+    assert [e["event_type"] for e in events] == [COMMAND_ACCEPTED, COMMAND_COMPLETED]
+    accepted = cast("dict[str, object]", events[0]["payload"])
+    completed = cast("dict[str, object]", events[1]["payload"])
+    assert accepted["command"] == PAUSE_COMMAND
+    assert completed["command"] == PAUSE_COMMAND
+    assert completed["outcome"] == OUTCOME_OK
+    assert completed["duration_ms"] == 0
+
+
+@pytest.mark.parametrize(
+    "seed_state",
+    [SessionState.stopping, SessionState.suspended, SessionState.failed],
+    ids=["stopping", "suspended", "failed"],
+)
+def test_handle_pause_observed_noop_when_state_not_running(
+    seed_state: SessionState,
+    stores: tuple[SessionStore, EventStore],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-pause-noop")
+    store.update("sesh-pause-noop", state=seed_state)
+    handle_pause_observed(event_store, "sesh-pause-noop", 0, store)
+    session = store.get("sesh-pause-noop")
+    assert session is not None
+    assert session.state == seed_state
+    assert event_store.list("sesh-pause-noop") == []
+
+
+def test_handle_resume_observed_transitions_suspended_to_running_and_emits_pair(
+    stores: tuple[SessionStore, EventStore],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-resume")
+    store.update("sesh-resume", state=SessionState.suspended)
+    handle_resume_observed(event_store, "sesh-resume", 0, store)
+    session = store.get("sesh-resume")
+    assert session is not None
+    assert session.state == SessionState.running
+    events = event_store.list("sesh-resume")
+    assert [e["event_type"] for e in events] == [COMMAND_ACCEPTED, COMMAND_COMPLETED]
+    accepted = cast("dict[str, object]", events[0]["payload"])
+    completed = cast("dict[str, object]", events[1]["payload"])
+    assert accepted["command"] == RESUME_COMMAND
+    assert completed["command"] == RESUME_COMMAND
+    assert completed["outcome"] == OUTCOME_OK
+    assert completed["duration_ms"] == 0
+
+
+@pytest.mark.parametrize(
+    "seed_state",
+    [SessionState.running, SessionState.stopping, SessionState.failed],
+    ids=["running", "stopping", "failed"],
+)
+def test_handle_resume_observed_noop_when_state_not_suspended(
+    seed_state: SessionState,
+    stores: tuple[SessionStore, EventStore],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-resume-noop")
+    if seed_state != SessionState.running:
+        store.update("sesh-resume-noop", state=seed_state)
+    handle_resume_observed(event_store, "sesh-resume-noop", 0, store)
+    session = store.get("sesh-resume-noop")
+    assert session is not None
+    assert session.state == seed_state
+    assert event_store.list("sesh-resume-noop") == []
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_signal"),
+    [(STOP_COMMAND, signal.SIGTERM), (KILL_COMMAND, signal.SIGKILL)],
+    ids=["stop", "kill"],
+)
+def test_handler_accepts_suspended_starting_state(
+    command: str,
+    expected_signal: int,
+    stores: tuple[SessionStore, EventStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-sus")
+    store.update("sesh-sus", state=SessionState.suspended)
+    killpg_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr("psoul.core.control.os.killpg", lambda pid, sig: killpg_calls.append((pid, sig)))
+    state = _state_requesting(command)
+    if command == STOP_COMMAND:
+        handle_stop(state, _RunningProc(), event_store, "sesh-sus", 0, stop_timeout_seconds=10.0, store=store)
+    else:
+        handle_kill(state, _RunningProc(), event_store, "sesh-sus", 0, store=store)
+    assert killpg_calls == [(999, expected_signal)]
+    events = event_store.list("sesh-sus")
+    assert [e["event_type"] for e in events] == [COMMAND_ACCEPTED]
+    session = store.get("sesh-sus")
     assert session is not None
     assert session.state == SessionState.stopping
 
@@ -486,6 +602,54 @@ def test_check_escalation_swallows_race_when_killpg_finds_child_gone(monkeypatch
     assert state.escalation_fired is False
 
 
+def _poll_until(proc: subprocess.Popen[bytes], expected: str, timeout: float = 2.0) -> None:
+    """Call ``_poll_child_status`` until it returns *expected* or *timeout* expires."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = _poll_child_status(proc)
+        if result == expected:
+            return
+        if result is not None:
+            msg = f"expected {expected!r}, got {result!r}"
+            raise AssertionError(msg)
+        time.sleep(0.02)
+    msg = f"did not observe {expected!r} within {timeout}s"
+    raise AssertionError(msg)
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_poll_child_status_returns_none_when_no_change() -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert _poll_child_status(proc) is None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_poll_child_status_returns_stopped_then_continued() -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        os.kill(proc.pid, signal.SIGSTOP)
+        _poll_until(proc, "stopped")
+        os.kill(proc.pid, signal.SIGCONT)
+        _poll_until(proc, "continued")
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_poll_child_status_syncs_returncode_on_exit() -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(42)"])
+    _poll_until(proc, "exited")
+    assert proc.returncode == 42
+
+
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 @pytest.mark.parametrize(
@@ -591,6 +755,39 @@ def test_kill_process_group_scope(tmp_path: Path) -> None:
         os.kill(supervisor_pid, signal.SIGUSR2)
         os.waitpid(supervisor_pid, 0)
         _assert_pid_dies_within(grandchild_pid, 5.0)
+
+
+@requires_fork
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_supervisor_observes_external_sigstop_and_emits_pause_pair(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    child_script = (
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "while True: time.sleep(0.05)\n"
+    )
+    with closing(open_db(tmp_path)) as conn:
+        store = SessionStore(conn)
+        req = LaunchRequest(
+            session_id="obs",
+            launch_mode=LaunchMode.headless,
+            target=LaunchTarget(TargetType.script, "-c", (child_script, str(pid_file)), Path(sys.executable)),
+            cwd=tmp_path,
+        )
+        _, supervisor_pid = launch_headless(req, store, tmp_path)
+        _wait_until_running(store, "obs")
+        _wait_for_path(pid_file, timeout=3.0)
+        child_pid = int(pid_file.read_text())
+        os.killpg(child_pid, signal.SIGSTOP)
+        _wait_for_state(store, "obs", SessionState.suspended)
+        os.killpg(child_pid, signal.SIGCONT)
+        _wait_for_state(store, "obs", SessionState.running)
+        completed = EventStore(conn).list("obs", event_type=COMMAND_COMPLETED)
+        payloads = [cast("dict[str, object]", e["payload"]) for e in completed]
+        assert [p["command"] for p in payloads] == [PAUSE_COMMAND, RESUME_COMMAND]
+        assert all(p["outcome"] == OUTCOME_OK for p in payloads)
+        os.kill(child_pid, signal.SIGKILL)
+        os.waitpid(supervisor_pid, 0)
 
 
 def test_new_message_id_is_valid_uuid4() -> None:
