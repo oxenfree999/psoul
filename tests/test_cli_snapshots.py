@@ -50,9 +50,12 @@ def test_main_help() -> None:
 │ repl       Start an interactive REPL session.                                │
 │ doctor     Check psoul environment and report status.                        │
 │ run        Launch a Python target as a managed session.                      │
-│ stop       Stop a running headless session. Escalates to SIGKILL after the   │
-│            stop_timeout grace period.                                        │
-│ kill       Kill a running headless session immediately (no grace period).    │
+│ stop       Stop a running or suspended headless session. Escalates to        │
+│            SIGKILL after the stop_timeout grace period.                      │
+│ kill       Kill a running or suspended headless session immediately (no      │
+│            grace period).                                                    │
+│ pause      Freeze a running headless session (SIGSTOP).                      │
+│ resume     Unfreeze a suspended headless session (SIGCONT).                  │
 │ ps         List sessions.                                                    │
 │ status     Show session detail.                                              │
 │ logs       Print captured stdout/stderr for a session.                       │
@@ -129,8 +132,8 @@ def test_stop_help() -> None:
                                                                                 \n\
  Usage: psoul stop [OPTIONS] SESSION_ID                                         \n\
                                                                                 \n\
- Stop a running headless session. Escalates to SIGKILL after the stop_timeout   \n\
- grace period.                                                                  \n\
+ Stop a running or suspended headless session. Escalates to SIGKILL after the   \n\
+ stop_timeout grace period.                                                     \n\
                                                                                 \n\
 ╭─ Arguments ──────────────────────────────────────────────────────────────────╮
 │ *    session_id      TEXT  Session ID or unique prefix. [required]           │
@@ -149,7 +152,45 @@ def test_kill_help() -> None:
                                                                                 \n\
  Usage: psoul kill [OPTIONS] SESSION_ID                                         \n\
                                                                                 \n\
- Kill a running headless session immediately (no grace period).                 \n\
+ Kill a running or suspended headless session immediately (no grace period).    \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id      TEXT  Session ID or unique prefix. [required]           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_pause_help() -> None:
+    result = runner.invoke(cli, ["pause", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul pause [OPTIONS] SESSION_ID                                        \n\
+                                                                                \n\
+ Freeze a running headless session (SIGSTOP).                                   \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id      TEXT  Session ID or unique prefix. [required]           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_resume_help() -> None:
+    result = runner.invoke(cli, ["resume", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul resume [OPTIONS] SESSION_ID                                       \n\
+                                                                                \n\
+ Unfreeze a suspended headless session (SIGCONT).                               \n\
                                                                                 \n\
 ╭─ Arguments ──────────────────────────────────────────────────────────────────╮
 │ *    session_id      TEXT  Session ID or unique prefix. [required]           │
