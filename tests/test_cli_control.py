@@ -329,7 +329,10 @@ def test_stop_on_suspended_session_waits_for_sigkill_escalation(
     config.write_text('[process]\nstop_timeout = "1s"\n')
     script = tmp_path / "ignore_term.py"
     script.write_text(
-        "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nwhile True: time.sleep(0.05)\n"
+        "import pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(__file__).parent.joinpath('child_ready').touch()\n"
+        "while True: time.sleep(0.05)\n"
     )
     launch = runner.invoke(cli, ["--config", str(config), "run", "--headless", str(script)])
     assert launch.exit_code == 0
@@ -337,6 +340,11 @@ def test_stop_on_suspended_session_waits_for_sigkill_escalation(
     session_id = info["session_id"]
     supervisor_pid = info["supervisor_pid"]
     _wait_for_state(tmp_path, session_id, SessionState.running)
+    ready_file = tmp_path / "child_ready"
+    ready_deadline = time.monotonic() + 5.0
+    while time.monotonic() < ready_deadline and not ready_file.exists():
+        time.sleep(0.02)
+    assert ready_file.exists(), "child did not signal ready within 5s"
     assert runner.invoke(cli, ["--config", str(config), "pause", session_id]).exit_code == 0
     _wait_for_state(tmp_path, session_id, SessionState.suspended)
     stop = runner.invoke(cli, ["--config", str(config), "stop", session_id])
