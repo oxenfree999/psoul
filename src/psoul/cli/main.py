@@ -34,6 +34,10 @@ from psoul.core.session import TERMINAL_STATES, LaunchMode, Session, SessionStat
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
 
+_SIGNAL_ACCEPT_STATES: frozenset[SessionState] = frozenset(
+    {SessionState.running, SessionState.suspended, SessionState.orphaned}
+)
+
 
 class DefaultRunGroup(TyperGroup):
     """Route bare file arguments to ``run`` for shorthand invocation.
@@ -490,6 +494,78 @@ def resume(
 ) -> None:
     """Unfreeze a suspended headless session (SIGCONT)."""
     _deliver_child_pgroup_signal(ctx, session_id, signame="SIGCONT", verb="resume", accept_state=SessionState.suspended)
+
+
+def _resolve_signal_name(raw: str) -> signal.Signals:
+    """Return the ``signal.Signals`` member for *raw*, or exit with a usage error.
+
+    Accepts short (``TERM``) and full (``SIGTERM``) forms, case-insensitive.
+    """
+    name = raw.strip().upper()
+    if not name.startswith("SIG"):
+        name = f"SIG{name}"
+    try:
+        return signal.Signals[name]
+    except KeyError:
+        print(f"Error: unknown signal: {raw}", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE) from None
+
+
+def _deliver_named_signal_to_pgroup(ctx: typer.Context, selector: str, raw_signal: str) -> None:
+    """Resolve *selector*, validate, and send the user-named signal to the child's process group.
+
+    Accepts running, suspended, and orphaned sessions. Orphaned sessions pass
+    validation but typically fail at ``_resolve_child_pid`` because the
+    supervisor is dead by definition.
+    """
+    if sys.platform == "win32":
+        print("Error: signal is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE)
+    sig = _resolve_signal_name(raw_signal)
+    state: GlobalState = ctx.obj
+    cfg = _load_resolved_config(state.config_override)
+    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+        recover_sessions(conn)
+        try:
+            session = _resolve_session_selector(SessionStore(conn), selector)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE) from None
+        if session.launch_mode != LaunchMode.headless:
+            msg = f"signal requires a headless session (this session is attached): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state == SessionState.stopping:
+            print(f"Error: session is already stopping: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state not in _SIGNAL_ACCEPT_STATES:
+            msg = f"session is not running, suspended, or orphaned (state: {session.state}): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.supervisor_pid is None:
+            print(f"Error: session has no supervisor: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR)
+        child_pid = _resolve_child_pid(session.supervisor_pid, session.session_id)
+        try:
+            os.killpg(child_pid, sig)
+        except ProcessLookupError:
+            print(f"session's child has already exited: {session.session_id}")
+            return
+        except PermissionError:
+            msg = f"permission denied signalling child (PID={child_pid}): {session.session_id}"
+            print(f"Error: {msg}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from None
+        print(f"Sent {sig.name} to {session.session_id}.")
+
+
+@cli.command(name="signal")
+def send_signal(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+    signal_name: Annotated[str, typer.Argument(help="Signal name (e.g., TERM, USR1, SIGUSR1).")],
+) -> None:
+    """Send a named POSIX signal to a running, suspended, or orphaned headless session's process group."""
+    _deliver_named_signal_to_pgroup(ctx, session_id, signal_name)
 
 
 @cli.command()
