@@ -56,6 +56,8 @@ def test_main_help() -> None:
 │            grace period).                                                    │
 │ pause      Freeze a running headless session (SIGSTOP).                      │
 │ resume     Unfreeze a suspended headless session (SIGCONT).                  │
+│ signal     Send a named POSIX signal to a running, suspended, or orphaned    │
+│            headless session's process group.                                 │
 │ ps         List sessions.                                                    │
 │ status     Show session detail.                                              │
 │ logs       Print captured stdout/stderr for a session.                       │
@@ -194,6 +196,28 @@ def test_resume_help() -> None:
                                                                                 \n\
 ╭─ Arguments ──────────────────────────────────────────────────────────────────╮
 │ *    session_id      TEXT  Session ID or unique prefix. [required]           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_signal_help() -> None:
+    result = runner.invoke(cli, ["signal", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul signal [OPTIONS] SESSION_ID SIGNAL_NAME                           \n\
+                                                                                \n\
+ Send a named POSIX signal to a running, suspended, or orphaned headless        \n\
+ session's process group.                                                       \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id       TEXT  Session ID or unique prefix. [required]          │
+│ *    signal_name      TEXT  Signal name (e.g., TERM, USR1, SIGUSR1).         │
+│                             [required]                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                │
