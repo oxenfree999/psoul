@@ -332,32 +332,44 @@ def _finalize_exit(
     return final
 
 
+def _spawn_generation(
+    request: LaunchRequest,
+    state_dir: Path,
+    session_id: str,
+    generation: int,
+) -> tuple[subprocess.Popen[bytes], ResourceSampler | None, threading.Thread | None]:
+    """Spawn the child in its own process group and prepare the ResourceSampler thread."""
+    proc = subprocess.Popen(  # noqa: S603
+        request.target.as_cmd(),
+        cwd=request.cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    sampler: ResourceSampler | None = None
+    sampler_thread: threading.Thread | None = None
+    try:
+        ps_process = psutil.Process(proc.pid)
+        sampler = ResourceSampler(ps_process, state_dir, session_id, generation)
+        sampler_thread = threading.Thread(target=sampler.run, args=(_SAMPLE_INTERVAL,), daemon=True)
+    except psutil.NoSuchProcess:
+        pass  # child already exited; skip sampling, supervise loop still finalizes
+    return proc, sampler, sampler_thread
+
+
 def _supervise(request: LaunchRequest, state_dir: Path, *, stop_timeout_seconds: float) -> None:
     """Background supervisor: spawn target in its own pgroup, serve control signals, finalize on child exit."""
     conn = open_db(state_dir)
     try:
         sup_store = SessionStore(conn)
         event_store = EventStore(conn)
-        proc = subprocess.Popen(  # noqa: S603
-            request.target.as_cmd(),
-            cwd=request.cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+        proc, sampler, sampler_thread = _spawn_generation(request, state_dir, request.session_id, generation=0)
         control_state = control.ControlState()
         control.install_handlers(control_state)
         session = sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
-        sampler: ResourceSampler | None = None
-        sampler_thread: threading.Thread | None = None
-        try:
-            ps_process = psutil.Process(proc.pid)
-            sampler = ResourceSampler(ps_process, state_dir, request.session_id, session.generation)
-            sampler_thread = threading.Thread(target=sampler.run, args=(_SAMPLE_INTERVAL,), daemon=True)
+        if sampler_thread is not None:
             sampler_thread.start()
-        except psutil.NoSuchProcess:
-            pass  # child already exited; skip sampling, supervise loop still finalizes
         start_mono = time.monotonic()
         try:
             _supervise_loop(
