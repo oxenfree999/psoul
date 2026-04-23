@@ -17,21 +17,27 @@ import pytest
 from psoul.core.control import (
     COMMAND_ACCEPTED,
     COMMAND_COMPLETED,
+    COMMAND_FAILED,
     KILL_COMMAND,
     OUTCOME_ESCALATED,
     OUTCOME_NOOP,
     OUTCOME_OK,
     PAUSE_COMMAND,
+    RESTART_COMMAND,
     RESUME_COMMAND,
+    SESSION_RESTARTED,
     STOP_COMMAND,
     ControlState,
     PendingCommand,
     SupervisedProc,
     _new_message_id,
+    advance_restart_on_spawn_failure,
+    advance_restart_on_spawn_success,
     check_escalation,
     emit_terminal_events,
     handle_kill,
     handle_pause_observed,
+    handle_restart,
     handle_resume_observed,
     handle_stop,
     install_handlers,
@@ -446,6 +452,23 @@ def test_emit_terminal_events_emits_both_late_noops_without_overwriting(
     assert state.kill_requested is False
 
 
+def test_emit_terminal_events_emits_late_noop_for_restart(stores: tuple[SessionStore, EventStore]) -> None:
+    """A SIGHUP that arrives after the supervise loop has exited emits a paired accepted+noop for restart."""
+    store, event_store = stores
+    _seed_running_session(store, "sesh-late-restart")
+    state = ControlState(restart_requested=True)
+    emit_terminal_events(state, event_store, "sesh-late-restart", 0)
+    events = event_store.list("sesh-late-restart")
+    assert [e["event_type"] for e in events] == [COMMAND_ACCEPTED, COMMAND_COMPLETED]
+    accepted_payload = cast("dict[str, object]", events[0]["payload"])
+    completed_payload = cast("dict[str, object]", events[1]["payload"])
+    assert accepted_payload["command"] == RESTART_COMMAND
+    assert completed_payload["command"] == RESTART_COMMAND
+    assert completed_payload["outcome"] == OUTCOME_NOOP
+    assert completed_payload["duration_ms"] == 0
+    assert state.restart_requested is False
+
+
 def test_handle_kill_after_escalation_is_noop_preserving_pending_stop(
     stores: tuple[SessionStore, EventStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -796,25 +819,188 @@ def test_new_message_id_is_valid_uuid4() -> None:
     assert parsed.version == 4
 
 
+_REQUEST_FLAGS = ("stop_requested", "kill_requested", "restart_requested")
+
+
 @pytest.mark.parametrize(
-    ("sig", "flipped_attr", "unaffected_attr"),
+    ("sig", "flipped_attr"),
     [
-        (signal.SIGUSR1, "stop_requested", "kill_requested"),
-        (signal.SIGUSR2, "kill_requested", "stop_requested"),
+        (signal.SIGUSR1, "stop_requested"),
+        (signal.SIGUSR2, "kill_requested"),
+        (signal.SIGHUP, "restart_requested"),
     ],
-    ids=["sigusr1-flips-stop", "sigusr2-flips-kill"],
+    ids=["sigusr1-flips-stop", "sigusr2-flips-kill", "sighup-flips-restart"],
 )
-def test_signal_flips_only_its_own_flag(sig: int, flipped_attr: str, unaffected_attr: str) -> None:
+def test_signal_flips_only_its_own_flag(sig: int, flipped_attr: str) -> None:
     state = ControlState()
-    assert getattr(state, flipped_attr) is False
-    assert getattr(state, unaffected_attr) is False
-    original_usr1 = signal.getsignal(signal.SIGUSR1)
-    original_usr2 = signal.getsignal(signal.SIGUSR2)
+    for flag in _REQUEST_FLAGS:
+        assert getattr(state, flag) is False
+    originals = {s: signal.getsignal(s) for s in (signal.SIGUSR1, signal.SIGUSR2, signal.SIGHUP)}
     try:
         install_handlers(state)
         os.kill(os.getpid(), sig)
-        assert getattr(state, flipped_attr) is True
-        assert getattr(state, unaffected_attr) is False
+        for flag in _REQUEST_FLAGS:
+            assert getattr(state, flag) is (flag == flipped_attr)
     finally:
-        signal.signal(signal.SIGUSR1, original_usr1)
-        signal.signal(signal.SIGUSR2, original_usr2)
+        for s, handler in originals.items():
+            signal.signal(s, handler)
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_advance_restart_transitions_row_and_emits_events(
+    outcome: str,
+    stores: tuple[SessionStore, EventStore],
+) -> None:
+    """After a restart's respawn resolves: row transitions, events fire, and restart state clears."""
+    store, event_store = stores
+    _seed_running_session(store, "sesh-adv")
+    store.update("sesh-adv", state=SessionState.restarting)  # outer loop puts row here first
+    state = ControlState(
+        restart_pending=PendingCommand(command=RESTART_COMMAND, message_id="m", start_monotonic=time.monotonic() - 0.5),
+        escalation_deadline=1.0,
+        escalation_fired=True,
+    )
+    if outcome == "success":
+        advance_restart_on_spawn_success(state, store, event_store, "sesh-adv", new_generation=1, new_control_epoch=1)
+    else:
+        advance_restart_on_spawn_failure(
+            state,
+            store,
+            event_store,
+            "sesh-adv",
+            generation=0,
+            error_kind="runtime_error",
+            error_message="boom",
+        )
+    session = store.get("sesh-adv")
+    assert session is not None
+    events = event_store.list("sesh-adv")
+    assert state.restart_pending is None
+    assert state.escalation_deadline is None
+    assert state.escalation_fired is False
+    if outcome == "success":
+        assert session.state == SessionState.running
+        assert session.generation == 1
+        assert session.control_epoch == 1
+        assert [e["event_type"] for e in events] == [SESSION_RESTARTED, COMMAND_COMPLETED]
+        assert cast("dict[str, object]", events[0]["payload"])["generation"] == 1
+        assert events[0]["generation"] == 1
+        completed_payload = cast("dict[str, object]", events[1]["payload"])
+        assert completed_payload["command"] == RESTART_COMMAND
+        assert completed_payload["outcome"] == OUTCOME_OK
+        assert completed_payload["message_id"] == "m"
+        assert events[1]["generation"] == 1
+    else:
+        assert session.state == SessionState.failed
+        assert [e["event_type"] for e in events] == [COMMAND_FAILED]
+        payload = cast("dict[str, object]", events[0]["payload"])
+        assert payload["command"] == RESTART_COMMAND
+        assert payload["message_id"] == "m"
+        error = cast("dict[str, object]", payload["error"])
+        assert error["kind"] == "runtime_error"
+        assert error["message"] == "boom"
+        assert events[0]["generation"] == 0  # pre-bump generation
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ["child-exited", "already-stopping", "restart-pending", "toctou"],
+)
+def test_handle_restart_noop_paths(
+    condition: str,
+    stores: tuple[SessionStore, EventStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """handle_restart emits paired accepted+noop (and does not SIGTERM) for every noop branch."""
+    store, event_store = stores
+    _seed_running_session(store, "sesh-r-noop")
+    killpg_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr("psoul.core.control.os.killpg", lambda pid, sig: killpg_calls.append((pid, sig)))
+    state = ControlState(restart_requested=True)
+    proc: SupervisedProc = _RunningProc()
+    if condition == "child-exited":
+        proc = _ExitedProc()
+    elif condition == "already-stopping":
+        state.stopping = True
+    elif condition == "restart-pending":
+        state.restart_pending = PendingCommand(command=RESTART_COMMAND, message_id="prior", start_monotonic=0.0)
+    elif condition == "toctou":
+        store.update("sesh-r-noop", state=SessionState.stopping)
+    expected_row_state = SessionState.stopping if condition == "toctou" else SessionState.running
+    handle_restart(state, proc, event_store, "sesh-r-noop", 0, stop_timeout_seconds=10.0, store=store)
+    events = event_store.list("sesh-r-noop")
+    assert [e["event_type"] for e in events] == [COMMAND_ACCEPTED, COMMAND_COMPLETED]
+    assert cast("dict[str, object]", events[0]["payload"])["command"] == RESTART_COMMAND
+    assert cast("dict[str, object]", events[1]["payload"])["outcome"] == OUTCOME_NOOP
+    assert killpg_calls == []
+    session = store.get("sesh-r-noop")
+    assert session is not None
+    assert session.state == expected_row_state  # row unchanged
+    assert state.restart_requested is False
+
+
+@pytest.mark.parametrize(
+    "accept_state",
+    [SessionState.running, SessionState.suspended],
+    ids=["running", "suspended"],
+)
+def test_handle_restart_happy_path_signals_pgroup_and_records_pending(
+    accept_state: SessionState,
+    stores: tuple[SessionStore, EventStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """handle_restart on an accept state: SIGTERM the child, arm escalation, record restart_pending, and emit accepted.
+
+    Does not transition the row — the outer loop does that after the old child exits.
+    """
+    store, event_store = stores
+    _seed_running_session(store, "sesh-r-happy")
+    if accept_state != SessionState.running:
+        store.update("sesh-r-happy", state=accept_state)
+    killpg_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr("psoul.core.control.os.killpg", lambda pid, sig: killpg_calls.append((pid, sig)))
+    state = ControlState(restart_requested=True)
+    handle_restart(state, _RunningProc(), event_store, "sesh-r-happy", 3, stop_timeout_seconds=10.0, store=store)
+    assert killpg_calls == [(999, signal.SIGTERM)]
+    events = event_store.list("sesh-r-happy")
+    assert [e["event_type"] for e in events] == [COMMAND_ACCEPTED]
+    accepted_payload = cast("dict[str, object]", events[0]["payload"])
+    assert accepted_payload["command"] == RESTART_COMMAND
+    assert events[0]["generation"] == 3  # tagged on the current (pre-restart) generation
+    session = store.get("sesh-r-happy")
+    assert session is not None
+    assert session.state == accept_state  # row NOT transitioned by handle_restart
+    assert state.restart_pending is not None
+    assert state.restart_pending.command == RESTART_COMMAND
+    assert state.escalation_deadline is not None
+    assert state.escalation_fired is False
+    assert state.restart_requested is False
+
+
+@pytest.mark.parametrize("command", [STOP_COMMAND, KILL_COMMAND], ids=["stop", "kill"])
+def test_handle_stop_or_kill_is_noop_when_restart_pending(
+    command: str,
+    stores: tuple[SessionStore, EventStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stop and kill emit paired accepted+noop (and do not signal) when a restart is in flight."""
+    store, event_store = stores
+    _seed_running_session(store, "sesh-rp-guard")
+    killpg_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr("psoul.core.control.os.killpg", lambda pid, sig: killpg_calls.append((pid, sig)))
+    existing = PendingCommand(command=RESTART_COMMAND, message_id="r-mid", start_monotonic=0.0)
+    state = _state_requesting(command)
+    state.restart_pending = existing
+    if command == STOP_COMMAND:
+        handle_stop(state, _RunningProc(), event_store, "sesh-rp-guard", 0, stop_timeout_seconds=10.0, store=store)
+    else:
+        handle_kill(state, _RunningProc(), event_store, "sesh-rp-guard", 0, store=store)
+    events = event_store.list("sesh-rp-guard")
+    assert [e["event_type"] for e in events] == [COMMAND_ACCEPTED, COMMAND_COMPLETED]
+    assert cast("dict[str, object]", events[0]["payload"])["command"] == command
+    assert cast("dict[str, object]", events[1]["payload"])["outcome"] == OUTCOME_NOOP
+    assert killpg_calls == []
+    session = store.get("sesh-rp-guard")
+    assert session is not None
+    assert session.state == SessionState.running  # row not transitioned
+    assert state.restart_pending is existing  # restart bookkeeping untouched

@@ -27,11 +27,14 @@ class SupervisedProc(Protocol):
 
 COMMAND_ACCEPTED = "command.accepted"
 COMMAND_COMPLETED = "command.completed"
+COMMAND_FAILED = "command.failed"
+SESSION_RESTARTED = "session.restarted"
 
 STOP_COMMAND = "stop"
 KILL_COMMAND = "kill"
 PAUSE_COMMAND = "pause"
 RESUME_COMMAND = "resume"
+RESTART_COMMAND = "restart"
 
 OUTCOME_OK = "ok"
 OUTCOME_ESCALATED = "escalated"
@@ -60,10 +63,12 @@ class ControlState:
 
     stop_requested: bool = False
     kill_requested: bool = False
+    restart_requested: bool = False
     stopping: bool = False
     escalation_deadline: float | None = None
     escalation_fired: bool = False
     pending: PendingCommand | None = None
+    restart_pending: PendingCommand | None = None
     completion_emitted: bool = False
 
 
@@ -94,12 +99,12 @@ def _now_iso() -> str:
 
 
 def install_handlers(state: ControlState) -> None:
-    """Install SIGUSR1 and SIGUSR2 handlers that flip request flags on *state*.
+    """Install SIGUSR1, SIGUSR2, and SIGHUP handlers that flip request flags on *state*.
 
     Must be called on the main thread. Each handler performs one
     attribute write and nothing else: no locks, no I/O, no event
     emission. The main supervise loop reads the flags each tick and
-    dispatches via ``handle_stop`` / ``handle_kill``.
+    dispatches via ``handle_stop`` / ``handle_kill`` / ``handle_restart``.
     """
 
     def _on_sigusr1(_signum: int, _frame: FrameType | None) -> None:
@@ -108,8 +113,12 @@ def install_handlers(state: ControlState) -> None:
     def _on_sigusr2(_signum: int, _frame: FrameType | None) -> None:
         state.kill_requested = True
 
+    def _on_sighup(_signum: int, _frame: FrameType | None) -> None:
+        state.restart_requested = True
+
     signal.signal(signal.SIGUSR1, _on_sigusr1)
     signal.signal(signal.SIGUSR2, _on_sigusr2)
+    signal.signal(signal.SIGHUP, _on_sighup)
 
 
 def _emit_accepted(
@@ -162,6 +171,89 @@ def _emit_noop_pair(
     _emit_completed(event_store, session_id, generation, command, message_id, OUTCOME_NOOP, 0)
 
 
+def _emit_failed(
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    command: str,
+    message_id: str,
+    error_kind: str,
+    error_message: str,
+) -> None:
+    """Append a ``command.failed`` event to the session's event log."""
+    payload: dict[str, object] = {
+        "command": command,
+        "message_id": message_id,
+        "error": {"kind": error_kind, "message": error_message},
+    }
+    event_store.append(session_id=session_id, event_type=COMMAND_FAILED, payload=payload, generation=generation)
+
+
+def _emit_session_restarted(event_store: EventStore, session_id: str, generation: int) -> None:
+    """Append a ``session.restarted`` event tagged on the new generation."""
+    payload: dict[str, object] = {"session_id": session_id, "generation": generation}
+    event_store.append(session_id=session_id, event_type=SESSION_RESTARTED, payload=payload, generation=generation)
+
+
+def advance_restart_on_spawn_success(
+    state: ControlState,
+    store: SessionStore,
+    event_store: EventStore,
+    session_id: str,
+    new_generation: int,
+    new_control_epoch: int,
+) -> None:
+    """Advance the row across a successful restart boundary and emit the paired events.
+
+    Transitions the row ``restarting → starting`` (bumping ``generation`` and
+    ``control_epoch`` atomically), emits ``session.restarted`` tagged on the
+    new generation, transitions ``starting → running``, emits
+    ``command.completed(restart, ok)`` tagged on the new generation, and
+    clears the restart bookkeeping on *state*.
+    """
+    pending = state.restart_pending
+    if pending is None:
+        msg = "advance_restart_on_spawn_success called with no restart_pending"
+        raise RuntimeError(msg)
+    store.update(session_id, generation=new_generation, control_epoch=new_control_epoch, state=SessionState.starting)
+    _emit_session_restarted(event_store, session_id, new_generation)
+    store.update(session_id, state=SessionState.running)
+    duration_ms = int((time.monotonic() - pending.start_monotonic) * 1000)
+    _emit_completed(
+        event_store, session_id, new_generation, RESTART_COMMAND, pending.message_id, OUTCOME_OK, duration_ms
+    )
+    state.restart_pending = None
+    state.escalation_deadline = None
+    state.escalation_fired = False
+
+
+def advance_restart_on_spawn_failure(
+    state: ControlState,
+    store: SessionStore,
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    error_kind: str,
+    error_message: str,
+) -> None:
+    """Close a restart whose respawn exhausted its retry budget.
+
+    Emits ``command.failed(restart, error=...)`` tagged on *generation* (the
+    pre-bump generation, since the new generation never existed), transitions
+    the row ``restarting → failed``, and clears the restart bookkeeping on
+    *state*.
+    """
+    pending = state.restart_pending
+    if pending is None:
+        msg = "advance_restart_on_spawn_failure called with no restart_pending"
+        raise RuntimeError(msg)
+    _emit_failed(event_store, session_id, generation, RESTART_COMMAND, pending.message_id, error_kind, error_message)
+    store.update(session_id, state=SessionState.failed)
+    state.restart_pending = None
+    state.escalation_deadline = None
+    state.escalation_fired = False
+
+
 def handle_stop(
     state: ControlState,
     proc: SupervisedProc,
@@ -189,7 +281,7 @@ def handle_stop(
     mid = _new_message_id()
     sent_at = _now_iso()
     now_mono = time.monotonic()
-    if proc.poll() is not None or state.stopping:
+    if proc.poll() is not None or state.stopping or state.restart_pending is not None:
         _emit_noop_pair(event_store, session_id, generation, STOP_COMMAND, mid, sent_at)
         state.stop_requested = False
         return
@@ -245,7 +337,7 @@ def handle_kill(
     mid = _new_message_id()
     sent_at = _now_iso()
     now_mono = time.monotonic()
-    if proc.poll() is not None:
+    if proc.poll() is not None or state.restart_pending is not None:
         _emit_noop_pair(event_store, session_id, generation, KILL_COMMAND, mid, sent_at)
         state.kill_requested = False
         return
@@ -287,6 +379,43 @@ def handle_kill(
         _emit_completed(event_store, session_id, generation, KILL_COMMAND, mid, OUTCOME_NOOP, 0)
         state.completion_emitted = True
     state.kill_requested = False
+
+
+def handle_restart(
+    state: ControlState,
+    proc: SupervisedProc,
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    stop_timeout_seconds: float,
+    store: SessionStore,
+) -> None:
+    """Dispatch a ``restart_requested`` flag: record the pending restart, SIGTERM the child, emit accepted.
+
+    Does not transition the session row. The outer generation loop in
+    ``_supervise`` moves the row to ``restarting`` only after the old
+    child has exited, matching ``restarting`` as the post-exit /
+    pre-spawn window. ``command.completed(restart, ok)`` fires from that
+    same outer loop after the new generation reaches ``running``.
+    """
+    mid = _new_message_id()
+    sent_at = _now_iso()
+    now_mono = time.monotonic()
+    if proc.poll() is not None or state.stopping or state.restart_pending is not None:
+        _emit_noop_pair(event_store, session_id, generation, RESTART_COMMAND, mid, sent_at)
+        state.restart_requested = False
+        return
+    current = store.get(session_id)
+    if current is None or current.state not in {SessionState.running, SessionState.suspended}:
+        _emit_noop_pair(event_store, session_id, generation, RESTART_COMMAND, mid, sent_at)
+        state.restart_requested = False
+        return
+    state.restart_pending = PendingCommand(command=RESTART_COMMAND, message_id=mid, start_monotonic=now_mono)
+    state.escalation_deadline = now_mono + stop_timeout_seconds
+    state.escalation_fired = False
+    _emit_accepted(event_store, session_id, generation, RESTART_COMMAND, mid, sent_at)
+    _killpg_if_alive(proc.pid, signal.SIGTERM)
+    state.restart_requested = False
 
 
 def handle_pause_observed(
@@ -372,9 +501,12 @@ def emit_terminal_events(
            ``completed(outcome="escalated" if escalation_fired else "ok")``
            with the elapsed duration in milliseconds.
     2. Close late-arrival signals:
-           if ``stop_requested`` or ``kill_requested`` is still set, a signal
-           arrived after the loop exited and was never dispatched. Emit a
-           paired ``accepted + completed(noop)`` for each set flag.
+           if ``stop_requested``, ``kill_requested``, or ``restart_requested``
+           is still set, a signal arrived after the loop exited and was
+           never dispatched. Emit a paired ``accepted + completed(noop)``
+           for each set flag. ``restart_pending`` is left alone here because
+           the outer generation loop in ``_supervise`` owns the in-flight
+           restart's terminal event.
     """
     now_mono = time.monotonic()
     pending = state.pending
@@ -393,3 +525,8 @@ def emit_terminal_events(
         sent_at = _now_iso()
         _emit_noop_pair(event_store, session_id, generation, KILL_COMMAND, mid, sent_at)
         state.kill_requested = False
+    if state.restart_requested:
+        mid = _new_message_id()
+        sent_at = _now_iso()
+        _emit_noop_pair(event_store, session_id, generation, RESTART_COMMAND, mid, sent_at)
+        state.restart_requested = False
