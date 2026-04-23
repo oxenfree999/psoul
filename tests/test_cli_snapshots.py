@@ -54,6 +54,8 @@ def test_main_help() -> None:
 │            SIGKILL after the stop_timeout grace period.                      │
 │ kill       Kill a running or suspended headless session immediately (no      │
 │            grace period).                                                    │
+│ restart    Stop and relaunch a running or suspended headless session. Same   │
+│            session ID, new generation.                                       │
 │ pause      Freeze a running headless session (SIGSTOP).                      │
 │ resume     Unfreeze a suspended headless session (SIGCONT).                  │
 │ signal     Send a named POSIX signal to a running, suspended, or orphaned    │
@@ -155,6 +157,26 @@ def test_kill_help() -> None:
  Usage: psoul kill [OPTIONS] SESSION_ID                                         \n\
                                                                                 \n\
  Kill a running or suspended headless session immediately (no grace period).    \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id      TEXT  Session ID or unique prefix. [required]           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_restart_help() -> None:
+    result = runner.invoke(cli, ["restart", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul restart [OPTIONS] SESSION_ID                                      \n\
+                                                                                \n\
+ Stop and relaunch a running or suspended headless session. Same session ID,    \n\
+ new generation.                                                                \n\
                                                                                 \n\
 ╭─ Arguments ──────────────────────────────────────────────────────────────────╮
 │ *    session_id      TEXT  Session ID or unique prefix. [required]           │

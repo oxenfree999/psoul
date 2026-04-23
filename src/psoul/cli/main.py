@@ -409,6 +409,15 @@ def kill(
     _deliver_control_signal(ctx, session_id, signame="SIGUSR2", verb="kill")
 
 
+@cli.command()
+def restart(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+) -> None:
+    """Stop and relaunch a running or suspended headless session. Same session ID, new generation."""
+    _deliver_control_signal(ctx, session_id, signame="SIGHUP", verb="restart")
+
+
 def _resolve_child_pid(supervisor_pid: int, session_id: str) -> int:
     """Return the single managed child's PID, or exit with a clean error message."""
     try:

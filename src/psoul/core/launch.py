@@ -202,6 +202,7 @@ def launch_headless(
 
 _SAMPLE_INTERVAL = 2.0  # seconds between resource samples
 _SUPERVISE_TICK = 0.1  # seconds per supervise-loop iteration
+_RESPAWN_BACKOFFS: tuple[float, ...] = (1.0, 2.0, 4.0)  # sleep before each retry when a restart respawns the child
 
 
 def _drain_tick(
@@ -294,6 +295,10 @@ def _supervise_loop(
                 )
             if control_state.kill_requested:
                 control.handle_kill(control_state, proc, event_store, session_id, generation, store)
+            if control_state.restart_requested:
+                control.handle_restart(
+                    control_state, proc, event_store, session_id, generation, stop_timeout_seconds, store
+                )
             control.check_escalation(control_state, proc)
         while selector.get_map() and _drain_tick(
             selector, event_store, session_id, generation, timeout=_SUPERVISE_TICK
@@ -306,17 +311,23 @@ def _finalize_exit(
     session_id: str,
     store: SessionStore,
     start_monotonic: float,
-) -> Session:
-    """Record the result row and transition the session to ``exited`` or ``failed``.
+    *,
+    in_restart: bool = False,
+) -> Session | None:
+    """Record the result row and (unless ``in_restart``) transition the session to ``exited`` or ``failed``.
 
     If the session is already in ``stopping`` (because ``handle_stop`` or
     ``handle_kill`` has run), the intermediate ``running → stopping``
-    transition is skipped to avoid a ``stopping → stopping`` error.
+    transition is skipped to avoid a ``stopping → stopping`` error. When
+    ``in_restart=True``, records the result row for the current
+    generation and leaves the row at its pre-teardown state so the outer
+    generation loop can transition it to ``restarting``.
     """
     duration = time.monotonic() - start_monotonic
     outcome = "exited" if proc.returncode is not None and proc.returncode == 0 else "failed"
     final_state = SessionState.exited if proc.returncode == 0 else SessionState.failed
     current = store.get(session_id)
+    final: Session | None = None
     try:
         store.record_result(
             session_id=session_id,
@@ -326,9 +337,10 @@ def _finalize_exit(
             duration_seconds=duration,
         )
     finally:
-        if current is not None and current.state != SessionState.stopping:
-            store.update(session_id, state=SessionState.stopping)
-        final = store.update(session_id, state=final_state)
+        if not in_restart:
+            if current is not None and current.state != SessionState.stopping:
+                store.update(session_id, state=SessionState.stopping)
+            final = store.update(session_id, state=final_state)
     return final
 
 
@@ -358,36 +370,98 @@ def _spawn_generation(
     return proc, sampler, sampler_thread
 
 
+def _respawn_with_backoff(
+    request: LaunchRequest,
+    state_dir: Path,
+    new_generation: int,
+) -> tuple[subprocess.Popen[bytes], ResourceSampler | None, threading.Thread | None]:
+    """Retry ``_spawn_generation`` with ``_RESPAWN_BACKOFFS`` between attempts.
+
+    Re-raises the last ``OSError`` on exhaustion.
+    """
+    for attempt in range(len(_RESPAWN_BACKOFFS) + 1):
+        try:
+            return _spawn_generation(request, state_dir, request.session_id, generation=new_generation)
+        except OSError:
+            if attempt == len(_RESPAWN_BACKOFFS):
+                raise
+            time.sleep(_RESPAWN_BACKOFFS[attempt])
+    msg = "unreachable: loop iterates once more than _RESPAWN_BACKOFFS length"
+    raise RuntimeError(msg)
+
+
 def _supervise(request: LaunchRequest, state_dir: Path, *, stop_timeout_seconds: float) -> None:
-    """Background supervisor: spawn target in its own pgroup, serve control signals, finalize on child exit."""
+    """Background supervisor: spawn target, serve control signals, respawn across restarts, and finalize on exit.
+
+    The outer ``while True:`` loop is the generation loop. Each iteration runs
+    one supervise loop for one generation's child. On normal exit the outer
+    loop finalizes the session and breaks. On restart, ``_finalize_exit`` is
+    called with ``in_restart=True`` (record result without terminal
+    transition), the row moves to ``restarting``, and ``_respawn_with_backoff``
+    spawns generation N+1. ``advance_restart_on_spawn_success`` / ``..._failure``
+    handle the boundary events and state transitions.
+    """
     conn = open_db(state_dir)
     try:
         sup_store = SessionStore(conn)
         event_store = EventStore(conn)
-        proc, sampler, sampler_thread = _spawn_generation(request, state_dir, request.session_id, generation=0)
         control_state = control.ControlState()
         control.install_handlers(control_state)
-        session = sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
-        if sampler_thread is not None:
-            sampler_thread.start()
-        start_mono = time.monotonic()
-        try:
-            _supervise_loop(
-                proc,
-                session_id=request.session_id,
-                event_store=event_store,
-                generation=session.generation,
-                store=sup_store,
-                control_state=control_state,
-                stop_timeout_seconds=stop_timeout_seconds,
-            )
-            control.emit_terminal_events(control_state, event_store, request.session_id, session.generation)
-        finally:
-            if sampler is not None:
-                sampler.stop()
+        generation = 0
+        proc, sampler, sampler_thread = _spawn_generation(request, state_dir, request.session_id, generation=generation)
+        sup_store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
+        while True:
             if sampler_thread is not None:
-                sampler_thread.join()
-        _finalize_exit(proc, request.session_id, sup_store, start_mono)
+                sampler_thread.start()
+            start_mono = time.monotonic()
+            try:
+                _supervise_loop(
+                    proc,
+                    session_id=request.session_id,
+                    event_store=event_store,
+                    generation=generation,
+                    store=sup_store,
+                    control_state=control_state,
+                    stop_timeout_seconds=stop_timeout_seconds,
+                )
+                control.emit_terminal_events(control_state, event_store, request.session_id, generation)
+            finally:
+                if sampler is not None:
+                    sampler.stop()
+                if sampler_thread is not None:
+                    sampler_thread.join()
+            if control_state.restart_pending is None:
+                _finalize_exit(proc, request.session_id, sup_store, start_mono)
+                break
+            _finalize_exit(proc, request.session_id, sup_store, start_mono, in_restart=True)
+            sup_store.update(request.session_id, state=SessionState.restarting)
+            new_generation = generation + 1
+            try:
+                proc, sampler, sampler_thread = _respawn_with_backoff(request, state_dir, new_generation)
+            except OSError as exc:
+                control.advance_restart_on_spawn_failure(
+                    control_state,
+                    sup_store,
+                    event_store,
+                    request.session_id,
+                    generation,
+                    "runtime_error",
+                    str(exc),
+                )
+                break
+            current = sup_store.get(request.session_id)
+            if current is None:
+                msg = f"session row disappeared mid-restart: {request.session_id}"
+                raise RuntimeError(msg)
+            control.advance_restart_on_spawn_success(
+                control_state,
+                sup_store,
+                event_store,
+                request.session_id,
+                new_generation,
+                current.control_epoch + 1,
+            )
+            generation = new_generation
         sup_store.update(request.session_id, supervisor_pid=None)
     finally:
         conn.close()

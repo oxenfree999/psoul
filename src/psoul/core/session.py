@@ -57,7 +57,9 @@ VALID_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
             SessionState.orphaned,
         }
     ),
-    SessionState.suspended: frozenset({SessionState.running, SessionState.stopping, SessionState.failed}),
+    SessionState.suspended: frozenset(
+        {SessionState.running, SessionState.restarting, SessionState.stopping, SessionState.failed}
+    ),
     SessionState.debugging: frozenset({SessionState.running, SessionState.stopping, SessionState.failed}),
     SessionState.restarting: frozenset({SessionState.starting, SessionState.failed}),
     SessionState.stopping: frozenset({SessionState.exited, SessionState.failed}),
