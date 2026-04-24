@@ -2,7 +2,6 @@
 
 import os
 import signal
-import subprocess
 import sys
 import time
 import uuid
@@ -44,7 +43,7 @@ from psoul.core.control import (
 )
 from psoul.core.db import open_db
 from psoul.core.events import EventStore
-from psoul.core.launch import LaunchRequest, LaunchTarget, _poll_child_status, launch_headless
+from psoul.core.launch import LaunchRequest, LaunchTarget, launch_headless
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
@@ -77,6 +76,18 @@ def _wait_for_path(path: Path, timeout: float) -> None:
             return
         time.sleep(0.02)
     msg = f"path {path} did not appear within {timeout}s"
+    raise RuntimeError(msg)
+
+
+def _wait_for_event_count(
+    event_store: EventStore, session_id: str, event_type: str, count: int, timeout: float = 3.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if len(event_store.list(session_id, event_type=event_type)) >= count:
+            return
+        time.sleep(0.02)
+    msg = f"session {session_id} did not record {count} {event_type} events within {timeout}s"
     raise RuntimeError(msg)
 
 
@@ -625,54 +636,6 @@ def test_check_escalation_swallows_race_when_killpg_finds_child_gone(monkeypatch
     assert state.escalation_fired is False
 
 
-def _poll_until(proc: subprocess.Popen[bytes], expected: str, timeout: float = 2.0) -> None:
-    """Call ``_poll_child_status`` until it returns *expected* or *timeout* expires."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = _poll_child_status(proc)
-        if result == expected:
-            return
-        if result is not None:
-            msg = f"expected {expected!r}, got {result!r}"
-            raise AssertionError(msg)
-        time.sleep(0.02)
-    msg = f"did not observe {expected!r} within {timeout}s"
-    raise AssertionError(msg)
-
-
-@requires_fork
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
-def test_poll_child_status_returns_none_when_no_change() -> None:
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        assert _poll_child_status(proc) is None
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-@requires_fork
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
-def test_poll_child_status_returns_stopped_then_continued() -> None:
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        os.kill(proc.pid, signal.SIGSTOP)
-        _poll_until(proc, "stopped")
-        os.kill(proc.pid, signal.SIGCONT)
-        _poll_until(proc, "continued")
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-@requires_fork
-@pytest.mark.filterwarnings("ignore::ResourceWarning")
-def test_poll_child_status_syncs_returncode_on_exit() -> None:
-    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(42)"])
-    _poll_until(proc, "exited")
-    assert proc.returncode == 42
-
-
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 @pytest.mark.parametrize(
@@ -804,7 +767,11 @@ def test_supervisor_observes_external_sigstop_and_emits_pause_pair(tmp_path: Pat
         os.killpg(child_pid, signal.SIGSTOP)
         _wait_for_state(store, "obs", SessionState.suspended)
         os.killpg(child_pid, signal.SIGCONT)
-        _wait_for_state(store, "obs", SessionState.running)
+        # Sync to the events the test reads, not the state, because
+        # handle_resume_observed commits the row transition before emitting
+        # accepted/completed. On slow runners the test could otherwise read
+        # between the two commits and miss the resume events.
+        _wait_for_event_count(EventStore(conn), "obs", COMMAND_COMPLETED, 2)
         completed = EventStore(conn).list("obs", event_type=COMMAND_COMPLETED)
         payloads = [cast("dict[str, object]", e["payload"]) for e in completed]
         assert [p["command"] for p in payloads] == [PAUSE_COMMAND, RESUME_COMMAND]

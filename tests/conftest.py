@@ -1,7 +1,13 @@
+import sys
 from collections.abc import Iterator
 
 import pytest
 import structlog
+
+collect_ignore_glob: list[str] = []
+if sys.platform == "win32":
+    # ptyprocess is a Unix-only dependency. Skip collecting pty_spawn tests on Windows.
+    collect_ignore_glob.append("test_pty_spawn.py")
 
 
 @pytest.fixture(autouse=True)
