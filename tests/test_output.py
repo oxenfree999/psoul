@@ -1,4 +1,4 @@
-"""Tests for drain_output and headless stdout/stderr capture end-to-end."""
+"""Tests for headless session output capture end-to-end."""
 
 import json
 import os
@@ -16,8 +16,7 @@ from typer.testing import CliRunner
 
 from psoul.cli.main import cli
 from psoul.core.db import open_db
-from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
-from psoul.core.output import drain_output
+from psoul.core.events import EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.recovery import ProcessStatus, check_pid
 from psoul.core.resources import EVENT_RESOURCE_TELEMETRY
 from psoul.core.session import LaunchMode, Session, SessionState
@@ -26,10 +25,6 @@ from psoul.version import VERSION
 
 runner = CliRunner()
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
-requires_unix_pipes = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows SelectSelector only handles sockets, not pipes",
-)
 
 
 def _make_session(session_id: str = "test-session") -> Session:
@@ -74,76 +69,6 @@ def event_store(tmp_path: Path) -> Iterator[EventStore]:
     with closing(open_db(tmp_path)) as conn:
         SessionStore(conn).create(_make_session())
         yield EventStore(conn)
-
-
-@requires_unix_pipes
-@pytest.mark.parametrize(
-    ("code", "expected_type", "expected_text"),
-    [
-        ("print('hello')", EVENT_RUNTIME_STDOUT, "hello"),
-        ("import sys; print('oops', file=sys.stderr)", EVENT_RUNTIME_STDERR, "oops"),
-    ],
-    ids=["stdout", "stderr"],
-)
-def test_drain_captures_single_stream(
-    event_store: EventStore,
-    code: str,
-    expected_type: str,
-    expected_text: str,
-) -> None:
-    with subprocess.Popen(  # noqa: S603
-        [sys.executable, "-c", code],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    ) as proc:
-        drain_output(proc, session_id="test-session", event_store=event_store, generation=0)
-    events = event_store.list("test-session", event_type=expected_type)
-    assert events
-    assert any(expected_text in str(e["payload"]) for e in events)
-
-
-@requires_unix_pipes
-def test_drain_captures_interleaved_streams(event_store: EventStore) -> None:
-    with subprocess.Popen(
-        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    ) as proc:
-        drain_output(proc, session_id="test-session", event_store=event_store, generation=0)
-    stdout_events = event_store.list("test-session", event_type=EVENT_RUNTIME_STDOUT)
-    stderr_events = event_store.list("test-session", event_type=EVENT_RUNTIME_STDERR)
-    assert any("out" in str(e["payload"]) for e in stdout_events)
-    assert any("err" in str(e["payload"]) for e in stderr_events)
-
-
-def test_drain_no_pipes_returns_immediately(event_store: EventStore) -> None:
-    with subprocess.Popen(
-        [sys.executable, "-c", "print('ignored')"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ) as proc:
-        drain_output(proc, session_id="test-session", event_store=event_store, generation=0)
-    assert event_store.list("test-session") == []
-
-
-@requires_unix_pipes
-def test_drain_handles_non_utf8_bytes(event_store: EventStore) -> None:
-    with subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            r"import sys; sys.stdout.buffer.write(b'\xff\xfe\xfdok'); sys.stdout.buffer.flush()",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    ) as proc:
-        drain_output(proc, session_id="test-session", event_store=event_store, generation=0)
-    events = event_store.list("test-session", event_type=EVENT_RUNTIME_STDOUT)
-    assert events
-    combined = "".join(str(e["payload"]) for e in events)
-    assert "ok" in combined
-    assert "\ufffd" in combined
 
 
 @requires_fork
@@ -217,8 +142,12 @@ def test_events_follow_captures_live_stream(tmp_path: Path) -> None:
     )
     os.waitpid(record["supervisor_pid"], 0)
     assert follow.returncode == 0
-    event_types = {json.loads(line)["event_type"] for line in follow.stdout.strip().split("\n")}
-    assert {EVENT_RUNTIME_STDOUT, EVENT_RUNTIME_STDERR, EVENT_RESOURCE_TELEMETRY} <= event_types
+    lines = [json.loads(line) for line in follow.stdout.strip().split("\n")]
+    event_types = {event["event_type"] for event in lines}
+    assert {EVENT_RUNTIME_STDOUT, EVENT_RESOURCE_TELEMETRY} <= event_types
+    stdout_text = "".join(str(e["payload"]) for e in lines if e["event_type"] == EVENT_RUNTIME_STDOUT)
+    assert "hello" in stdout_text
+    assert "oops" in stdout_text
 
 
 @requires_fork
@@ -265,7 +194,6 @@ def test_logs_follow_captures_live_stream(tmp_path: Path) -> None:
     with closing(open_db(state_dir)) as conn:
         types_before = [e["event_type"] for e in EventStore(conn).list("e2e-logs-follow")]
     assert types_before.count(EVENT_RUNTIME_STDOUT) == 1
-    assert types_before.count(EVENT_RUNTIME_STDERR) == 0
     follow = subprocess.run(  # noqa: S603
         [_psoul_bin(), "--config", str(config), "logs", "--follow", "e2e-logs-follow"],
         capture_output=True,

@@ -17,10 +17,8 @@ from typer.testing import CliRunner
 from psoul.cli.main import cli
 from psoul.core.db import open_db
 from psoul.core.launch import (
-    _RESPAWN_BACKOFFS,
     LaunchRequest,
     LaunchTarget,
-    _respawn_with_backoff,
     build_launch_request,
     launch_attached,
     launch_headless,
@@ -544,27 +542,3 @@ def test_unknown_flag_not_swallowed_by_disambiguation() -> None:
     result = runner.invoke(cli, ["--bad", "script.py"])
     assert result.exit_code == 2
     assert "No such option: --bad" in click.unstyle(result.output)
-
-
-def test_respawn_with_backoff_exhausts_and_reraises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """After every attempt raises OSError, _respawn_with_backoff re-raises and sleeps between attempts."""
-    sleeps: list[float] = []
-    monkeypatch.setattr("psoul.core.launch.time.sleep", sleeps.append)
-
-    def _always_raise(*_args: object, **_kwargs: object) -> None:
-        raise OSError("boom")
-
-    monkeypatch.setattr("psoul.core.launch._spawn_generation", _always_raise)
-    request = build_launch_request(
-        target="noop.py",
-        module=None,
-        extra_args=[],
-        name="sesh-respawn",
-        headless=True,
-        tags=None,
-        python_path=Path(sys.executable),
-        default_mode=LaunchMode.attached,
-    )
-    with pytest.raises(OSError, match="boom"):
-        _respawn_with_backoff(request, tmp_path, new_generation=1)
-    assert sleeps == list(_RESPAWN_BACKOFFS)
