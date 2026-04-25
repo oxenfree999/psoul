@@ -9,7 +9,8 @@ from datetime import UTC, datetime
 from types import FrameType
 from typing import Protocol
 
-from psoul.core.events import EventStore
+from psoul.core.events import EVENT_SESSION_CONTROLLER_ACQUIRED, EVENT_SESSION_CONTROLLER_RELEASED, EventStore
+from psoul.core.recovery import ProcessStatus, check_pid
 from psoul.core.session import SessionState
 from psoul.core.store import SessionStore
 
@@ -457,6 +458,129 @@ def handle_resume_observed(
     sent_at = _now_iso()
     _emit_accepted(event_store, session_id, generation, RESUME_COMMAND, mid, sent_at)
     _emit_completed(event_store, session_id, generation, RESUME_COMMAND, mid, OUTCOME_OK, 0)
+
+
+def _try_clean_acquire_controller(
+    store: SessionStore,
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    client_pid: int,
+) -> int | None:
+    """Atomic clean-acquire UPDATE plus ``session.controller_acquired`` event INSERT.
+
+    Returns the new ``control_epoch`` on success, ``None`` when the row was
+    not in the ``controller_pid IS NULL`` state. Used twice by
+    ``handle_controller_acquired`` (initial attempt and post-clear retry).
+    """
+    cursor = store.conn.execute(
+        "UPDATE sessions SET controller_pid = ?, control_acquired_at = ?, "
+        "control_epoch = control_epoch + 1 "
+        "WHERE session_id = ? AND controller_pid IS NULL "
+        "RETURNING control_epoch",
+        [client_pid, _now_iso(), session_id],
+    )
+    row = cursor.fetchone()
+    if row is None:
+        store.conn.commit()
+        return None
+    new_epoch = row[0]
+    event_store.append(
+        session_id=session_id,
+        event_type=EVENT_SESSION_CONTROLLER_ACQUIRED,
+        payload={"session_id": session_id, "control_epoch": new_epoch, "controller_pid": client_pid},
+        generation=generation,
+        commit=False,
+    )
+    store.conn.commit()
+    return new_epoch
+
+
+def handle_controller_acquired(
+    store: SessionStore,
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+    client_pid: int,
+) -> int | None:
+    """Acquire the human-controller slot for *session_id*, reclaiming if the prior controller is dead.
+
+    Returns the new ``control_epoch`` when *client_pid* becomes the
+    controller, ``None`` when another live client already holds it
+    (caller surfaces this as a usage error).
+
+    Each row-mutating step pairs its UPDATE with the matching event INSERT
+    inside one SQLite transaction, so other actors cannot observe a row
+    change without the corresponding event already in the log:
+
+    1. Try clean-acquire (``controller_pid IS NULL`` → take it). If we win,
+       return the new epoch.
+    2. Otherwise read the row. If the existing controller is alive (or the
+       row is missing or already cleared), return ``None`` for contention.
+    3. If the existing controller is dead, atomically clear the row and
+       emit ``session.controller_released`` for the dead prior, then
+       re-attempt clean-acquire. Return the new epoch on success or
+       ``None`` if another acquirer raced in after our clear.
+    """
+    new_epoch = _try_clean_acquire_controller(store, event_store, session_id, generation, client_pid)
+    if new_epoch is not None:
+        return new_epoch
+
+    current = store.get(session_id)
+    if current is None or current.controller_pid is None:
+        return None
+    if check_pid(current.controller_pid) is not ProcessStatus.dead:
+        return None
+
+    old_pid = current.controller_pid
+    cursor = store.conn.execute(
+        "UPDATE sessions SET controller_pid = NULL, control_acquired_at = NULL "
+        "WHERE session_id = ? AND controller_pid = ?",
+        [session_id, old_pid],
+    )
+    if cursor.rowcount == 1:
+        event_store.append(
+            session_id=session_id,
+            event_type=EVENT_SESSION_CONTROLLER_RELEASED,
+            payload={"session_id": session_id},
+            generation=generation,
+            commit=False,
+        )
+    store.conn.commit()
+
+    return _try_clean_acquire_controller(store, event_store, session_id, generation, client_pid)
+
+
+def handle_controller_released(
+    store: SessionStore,
+    event_store: EventStore,
+    session_id: str,
+    generation: int,
+) -> bool:
+    """Atomically clear the controller row and emit ``session.controller_released``.
+
+    Idempotent. The UPDATE and the event INSERT commit in a single SQLite
+    transaction so other actors cannot observe ``controller_pid IS NULL``
+    without the release event also being visible in the event log. Returns
+    ``True`` when this call performed the release, ``False`` when the row
+    had no controller (someone else already cleared it).
+    """
+    cursor = store.conn.execute(
+        "UPDATE sessions SET controller_pid = NULL, control_acquired_at = NULL "
+        "WHERE session_id = ? AND controller_pid IS NOT NULL",
+        [session_id],
+    )
+    released = cursor.rowcount == 1
+    if released:
+        event_store.append(
+            session_id=session_id,
+            event_type=EVENT_SESSION_CONTROLLER_RELEASED,
+            payload={"session_id": session_id},
+            generation=generation,
+            commit=False,
+        )
+    store.conn.commit()
+    return released
 
 
 def check_escalation(state: ControlState, proc: SupervisedProc) -> None:
