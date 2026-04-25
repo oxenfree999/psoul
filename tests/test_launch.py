@@ -237,6 +237,30 @@ def test_headless_supervisor_reaps_failure(store: SessionStore, tmp_path: Path) 
     assert final.state == SessionState.failed
 
 
+@requires_fork
+def test_headless_child_exits_one_when_supervisor_body_raises(
+    store: SessionStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forked child force-exits with status 1 when anything in the child branch raises.
+
+    Without the post-fork safety wrap, an exception from ``_supervise`` (or
+    ``os.setsid`` or ``store.conn.close``) would propagate out of the
+    ``if child_pid == 0:`` branch and the child would resume running
+    parent-context code, which can fork-bomb a test runner.
+    """
+
+    def boom(**_kwargs: object) -> None:
+        msg = "supervisor body raised"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("psoul.core.launch._supervise", boom)
+    req = _script_request("pass", name="boom-session")
+    _, supervisor_pid = launch_headless(req, store, tmp_path)
+    _, status = os.waitpid(supervisor_pid, 0)
+    assert os.WIFEXITED(status), f"child did not exit normally: status={status}"
+    assert os.WEXITSTATUS(status) == 1
+
+
 def test_attached_launch_clears_supervisor_pid_on_exit(store: SessionStore) -> None:
     final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached), store)
     assert final.supervisor_pid is None
