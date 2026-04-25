@@ -1,8 +1,10 @@
 """Tests for pty_spawn: ManagedChild, poll observers, spawn, drain, and respawn backoff."""
 
+import errno
 import os
 import selectors
 import signal
+import socket
 import sys
 import time
 from collections.abc import Callable
@@ -17,9 +19,16 @@ from psoul.core.db import open_db
 from psoul.core.events import EVENT_RUNTIME_STDOUT, EventStore
 from psoul.core.launch import LaunchMode, build_launch_request
 from psoul.core.pty_spawn import (
+    _FRAME_DATA,
+    _FRAME_HELLO,
+    _FRAME_WINSIZE,
     _RESPAWN_BACKOFFS,
     ManagedChild,
+    _cleanup_listen_socket,
+    _create_listen_socket,
+    _decode_frames,
     _drain_tick,
+    _encode_frame,
     _finalize_exit,
     _poll_child_status,
     _respawn_with_backoff,
@@ -261,3 +270,76 @@ def test_drain_tick_reads_pty_main_fd_into_events(tmp_path: Path) -> None:
             assert any("hello" in str(e["payload"]) for e in events)
         finally:
             _cleanup_pty_child(pty_child)
+
+
+@pytest.mark.parametrize("preexisting", [False, True], ids=["fresh", "stale-file-exists"])
+def test_create_listen_socket_binds_at_short_tmp_path_with_user_private_mode(preexisting: bool) -> None:
+    session_id = "create-listen-test"
+    expected_path = Path(f"/tmp/psoul-{os.getuid()}-{session_id}.sock")
+    if preexisting:
+        expected_path.touch()
+    sock, path = _create_listen_socket(session_id)
+    try:
+        assert sock is not None
+        assert path is not None
+        assert path == expected_path
+        assert path.exists()
+        assert (path.stat().st_mode & 0o777) == 0o600
+        assert sock.family == socket.AF_UNIX
+        assert sock.type == socket.SOCK_STREAM
+    finally:
+        _cleanup_listen_socket(sock, path)
+
+
+def test_create_listen_socket_returns_none_on_bind_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def bind_fails(self: socket.socket, _addr: object) -> None:
+        raise OSError(errno.ENAMETOOLONG, "AF_UNIX path too long")
+
+    monkeypatch.setattr("socket.socket.bind", bind_fails)
+    sock, path = _create_listen_socket("bind-fail-test")
+    assert sock is None
+    assert path is None
+    expected_path = Path(f"/tmp/psoul-{os.getuid()}-bind-fail-test.sock")
+    assert not expected_path.exists()
+
+
+def test_cleanup_listen_socket_handles_none_inputs() -> None:
+    _cleanup_listen_socket(None, None)
+
+
+def test_cleanup_listen_socket_closes_socket_and_unlinks_path(tmp_path: Path) -> None:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    path = tmp_path / "stand-in-for-socket"
+    path.touch()
+    _cleanup_listen_socket(sock, path)
+    assert not path.exists()
+    assert sock.fileno() == -1
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        (_FRAME_DATA, b"hello world"),
+        (_FRAME_WINSIZE, b"\x00\x18\x00\x50\x00\x00\x00\x00"),
+        (_FRAME_HELLO, b"\x00\x00\x00\x42"),
+        (_FRAME_DATA, b""),
+    ],
+    ids=["data-text", "winsize-8b", "hello-pid", "empty-data"],
+)
+def test_encode_decode_frame_round_trips(kind: int, payload: bytes) -> None:
+    buffer = bytearray(_encode_frame(kind, payload))
+    frames = _decode_frames(buffer)
+    assert frames == [(kind, payload)]
+    assert len(buffer) == 0
+
+
+def test_decode_frames_consumes_complete_and_leaves_partial() -> None:
+    full = _encode_frame(_FRAME_DATA, b"complete") + _encode_frame(_FRAME_HELLO, b"\x00\x00\x00\x05")
+    buffer = bytearray(full[:-2])
+    frames = _decode_frames(buffer)
+    assert frames == [(_FRAME_DATA, b"complete")]
+    assert len(buffer) > 0
+    buffer.extend(full[-2:])
+    frames = _decode_frames(buffer)
+    assert frames == [(_FRAME_HELLO, b"\x00\x00\x00\x05")]
+    assert len(buffer) == 0

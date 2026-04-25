@@ -3,6 +3,8 @@
 import errno
 import os
 import selectors
+import socket
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -23,6 +25,35 @@ from psoul.core.store import SessionStore
 _SAMPLE_INTERVAL = 2.0  # seconds between resource samples
 _SUPERVISE_TICK = 0.1  # seconds per supervise-loop iteration
 _RESPAWN_BACKOFFS: tuple[float, ...] = (1.0, 2.0, 4.0)  # sleep before each retry when a restart respawns the child
+
+_FRAME_DATA = 0x01
+_FRAME_WINSIZE = 0x02
+_FRAME_HELLO = 0x03
+_FRAME_HEADER = struct.Struct("!BH")  # network-order: 1-byte type + 2-byte length
+
+
+def _encode_frame(kind: int, payload: bytes) -> bytes:
+    """Build a wire frame: 1 byte type + 2 bytes big-endian length + payload bytes."""
+    return _FRAME_HEADER.pack(kind, len(payload)) + payload
+
+
+def _decode_frames(buffer: bytearray) -> list[tuple[int, bytes]]:
+    """Consume complete frames from *buffer* in place. Return ``[(kind, payload), ...]``.
+
+    Mutates *buffer*: complete frames are removed from the front, and any
+    trailing partial bytes (an incomplete header or an unfilled payload)
+    remain so the next call resumes parsing where this one left off.
+    """
+    frames: list[tuple[int, bytes]] = []
+    header_size = _FRAME_HEADER.size
+    while len(buffer) >= header_size:
+        kind, length = _FRAME_HEADER.unpack_from(buffer)
+        if len(buffer) < header_size + length:
+            break
+        payload = bytes(buffer[header_size : header_size + length])
+        frames.append((kind, payload))
+        del buffer[: header_size + length]
+    return frames
 
 
 @dataclass(slots=True)
@@ -265,6 +296,42 @@ def _respawn_with_backoff(
     raise RuntimeError(msg)
 
 
+def _create_listen_socket(session_id: str) -> tuple[socket.socket | None, Path | None]:
+    """Create the per-session control socket at ``/tmp/psoul-<uid>-<session_id>.sock``.
+
+    Returns ``(socket, path)`` or ``(None, None)`` if ``bind()``,
+    ``chmod()``, ``listen()``, or the non-blocking switch fails. The
+    fixed ``/tmp`` prefix keeps the absolute path under
+    ``sockaddr_un.sun_path`` (~104 bytes on macOS, ~108 on Linux)
+    regardless of how deep the configured state directory sits. The
+    socket file is set to mode ``0o600`` so only the same UID can
+    connect. Caller closes and unlinks via ``_cleanup_listen_socket``.
+    Any stale socket file from a prior crashed supervisor is unlinked
+    first.
+    """
+    socket_path = Path(f"/tmp/psoul-{os.getuid()}-{session_id}.sock")  # noqa: S108 — /tmp required for AF_UNIX path-length on macOS, mode 0o600 mitigates
+    socket_path.unlink(missing_ok=True)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(str(socket_path))
+        socket_path.chmod(0o600)
+        sock.listen(4)
+        sock.setblocking(False)
+    except OSError:
+        sock.close()
+        socket_path.unlink(missing_ok=True)
+        return None, None
+    return sock, socket_path
+
+
+def _cleanup_listen_socket(sock: socket.socket | None, path: Path | None) -> None:
+    """Close *sock* and unlink *path* if they were ever created. Both are no-ops on ``None``."""
+    if sock is not None:
+        sock.close()
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
 def _supervise(
     argv: list[str],
     cwd: Path,
@@ -288,14 +355,22 @@ def _supervise(
     escaping the supervisor.
     """
     conn = open_db(state_dir)
+    listen_socket: socket.socket | None = None
+    socket_path: Path | None = None
     try:
+        listen_socket, socket_path = _create_listen_socket(session_id)
         sup_store = SessionStore(conn)
         event_store = EventStore(conn)
         control_state = control.ControlState()
         control.install_handlers(control_state)
         generation = 0
         pty_child, sampler, sampler_thread = _spawn_generation(argv, cwd, state_dir, session_id, generation=generation)
-        sup_store.update(session_id, state=SessionState.running, supervisor_pid=os.getpid())
+        sup_store.update(
+            session_id,
+            state=SessionState.running,
+            supervisor_pid=os.getpid(),
+            socket_path=socket_path,
+        )
         while True:
             if sampler_thread is not None:
                 sampler_thread.start()
@@ -350,6 +425,7 @@ def _supervise(
                 current.control_epoch + 1,
             )
             generation = new_generation
-        sup_store.update(session_id, supervisor_pid=None)
+        sup_store.update(session_id, supervisor_pid=None, socket_path=None)
     finally:
+        _cleanup_listen_socket(listen_socket, socket_path)
         conn.close()
