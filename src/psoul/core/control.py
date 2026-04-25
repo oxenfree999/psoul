@@ -556,20 +556,31 @@ def handle_controller_released(
     event_store: EventStore,
     session_id: str,
     generation: int,
+    controller_pid: int | None = None,
 ) -> bool:
     """Atomically clear the controller row and emit ``session.controller_released``.
 
     Idempotent. The UPDATE and the event INSERT commit in a single SQLite
     transaction so other actors cannot observe ``controller_pid IS NULL``
-    without the release event also being visible in the event log. Returns
-    ``True`` when this call performed the release, ``False`` when the row
-    had no controller (someone else already cleared it).
+    without the release event also being visible in the event log. When
+    *controller_pid* is provided, the clear matches that specific value, so a
+    stale disconnect from a prior controller cannot release a successor's row.
+    Returns ``True`` when this call performed the release, ``False`` when the
+    row had no matching controller (someone else already cleared it, or a
+    successor took over).
     """
-    cursor = store.conn.execute(
-        "UPDATE sessions SET controller_pid = NULL, control_acquired_at = NULL "
-        "WHERE session_id = ? AND controller_pid IS NOT NULL",
-        [session_id],
-    )
+    if controller_pid is None:
+        cursor = store.conn.execute(
+            "UPDATE sessions SET controller_pid = NULL, control_acquired_at = NULL "
+            "WHERE session_id = ? AND controller_pid IS NOT NULL",
+            [session_id],
+        )
+    else:
+        cursor = store.conn.execute(
+            "UPDATE sessions SET controller_pid = NULL, control_acquired_at = NULL "
+            "WHERE session_id = ? AND controller_pid = ?",
+            [session_id, controller_pid],
+        )
     released = cursor.rowcount == 1
     if released:
         event_store.append(
