@@ -69,6 +69,7 @@ def test_main_help() -> None:
 │ stats      Show current resource usage (CPU, memory, disk, GPU if            │
 │            available).                                                       │
 │ artifacts  List files produced by a session (plots, checkpoints, exports).   │
+│ prune      Remove completed sessions and their data by age, state, or tags.  │
 │ version    Show psoul version.                                               │
 │ config     Show and manage configuration.                                    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -264,6 +265,35 @@ def test_attach_help() -> None:
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_prune_help() -> None:
+    result = runner.invoke(cli, ["prune", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul prune [OPTIONS]                                                   \n\
+                                                                                \n\
+ Remove completed sessions and their data by age, state, or tags.               \n\
+                                                                                \n\
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --older-than          TEXT             Only prune sessions older than this   │
+│                                        duration (e.g. 1h30m).                │
+│ --state               [exited|failed]  Restrict to exited or failed          │
+│                                        sessions.                             │
+│ --tag                 TEXT             Restrict to sessions matching         │
+│                                        key=value (repeatable, AND logic).    │
+│ --all                                  Match every session row (mutually     │
+│                                        exclusive with                        │
+│                                        --older-than/--state/--tag).          │
+│ --force                                Allow non-terminal sessions in the    │
+│                                        match set.                            │
+│ --json                                 Emit a JSON object instead of         │
+│                                        human-readable lines.                 │
+│ --help        -h                       Show this message and exit.           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 """)

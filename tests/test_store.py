@@ -227,3 +227,39 @@ def test_record_result_missing_session_raises(store: SessionStore) -> None:
             end_time=datetime(2026, 1, 1, tzinfo=UTC),
             duration_seconds=0.0,
         )
+
+
+def test_delete_removes_session_and_cascades(store: SessionStore) -> None:
+    """delete() should drop the session row and let cascade clear dependent events."""
+    store.create(_session(session_id="bold-fox-builds-kites"))
+    store.conn.execute(
+        "INSERT INTO events (session_id, sequence, timestamp, event_type, payload) VALUES (?, ?, ?, ?, ?)",
+        ["bold-fox-builds-kites", 0, "2026-01-01T00:00:00+00:00", "session.started", "{}"],
+    )
+    store.conn.commit()
+    store.delete("bold-fox-builds-kites")
+    assert store.get("bold-fox-builds-kites") is None
+    event_count = store.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE session_id = ?", ["bold-fox-builds-kites"]
+    ).fetchone()[0]
+    assert event_count == 0
+
+
+def test_delete_missing_session_raises(store: SessionStore) -> None:
+    with pytest.raises(KeyError, match="session not found"):
+        store.delete("no-such-session")
+
+
+def test_delete_keeps_history_row_with_null_session_id(store: SessionStore) -> None:
+    """delete() leaves history rows in place with session_id cleared per ON DELETE SET NULL."""
+    store.create(_session(session_id="quick-fox-types-code"))
+    store.conn.execute(
+        "INSERT INTO history (session_id, timestamp, input) VALUES (?, ?, ?)",
+        ["quick-fox-types-code", "2026-01-01T00:00:00+00:00", "print('hi')"],
+    )
+    store.conn.commit()
+    store.delete("quick-fox-types-code")
+    row = store.conn.execute("SELECT session_id, input FROM history").fetchone()
+    assert row is not None
+    assert row["session_id"] is None
+    assert row["input"] == "print('hi')"

@@ -21,6 +21,7 @@ from typer.core import TyperGroup
 
 from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.logging import configure_logging, resolve_log_level
+from psoul.cli.prune import PruneState, run_prune
 from psoul.cli.repl import run_repl
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
 from psoul.core.artifacts import ArtifactStore
@@ -883,6 +884,48 @@ def artifacts(
             row["source"],
             row["retention_class"],
             sep="\t",
+        )
+
+
+@cli.command()
+def prune(
+    ctx: typer.Context,
+    older_than: Annotated[
+        str | None, typer.Option("--older-than", help="Only prune sessions older than this duration (e.g. 1h30m).")
+    ] = None,
+    state: Annotated[
+        PruneState | None,
+        typer.Option("--state", help="Restrict to exited or failed sessions.", case_sensitive=False),
+    ] = None,
+    tag: Annotated[
+        list[str] | None,
+        typer.Option("--tag", help="Restrict to sessions matching key=value (repeatable, AND logic)."),
+    ] = None,
+    all_flag: Annotated[
+        bool,
+        typer.Option("--all", help="Match every session row (mutually exclusive with --older-than/--state/--tag)."),
+    ] = False,
+    force: Annotated[bool, typer.Option("--force", help="Allow non-terminal sessions in the match set.")] = False,
+    json_flag: Annotated[
+        bool, typer.Option("--json", help="Emit a JSON object instead of human-readable lines.")
+    ] = False,
+) -> None:
+    """Remove completed sessions and their data by age, state, or tags."""
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    state_dir = resolve_state_dir(cfg.paths.state_dir)
+    with closing(_open_db_or_exit(state_dir)) as conn:
+        recover_sessions(conn)
+        run_prune(
+            SessionStore(conn),
+            conn,
+            state_dir,
+            older_than=older_than,
+            state=state,
+            tag=tag,
+            all_flag=all_flag,
+            force=force,
+            json_flag=json_flag,
         )
 
 

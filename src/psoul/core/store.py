@@ -434,6 +434,30 @@ class SessionStore:
             raise RuntimeError(msg)
         return updated
 
+    def delete(self, session_id: str) -> None:
+        """Remove a session row and let the schema cascade delete dependent rows.
+
+        ``events``, ``results``, ``commands``, ``artifacts``,
+        ``resource_samples``, and ``profiling_state`` are removed via
+        ``ON DELETE CASCADE``.  ``history`` rows survive with their
+        ``session_id`` set to ``NULL`` per the ``ON DELETE SET NULL`` foreign-key clause.
+
+        Args:
+            session_id (str): Session to delete.
+
+        Raises:
+            KeyError: Session does not exist.
+
+        Example:
+            >>> store.delete("calm-otter-builds-kites")
+
+        """
+        cursor = self.conn.execute("DELETE FROM sessions WHERE session_id = ?", [session_id])
+        if cursor.rowcount == 0:
+            msg = f"session not found: {session_id}"
+            raise KeyError(msg)
+        self.conn.commit()
+
     def record_result(
         self,
         session_id: str,
