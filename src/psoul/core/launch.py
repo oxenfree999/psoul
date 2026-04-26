@@ -1,9 +1,11 @@
 """Session launch: target parsing, request building, and process lifecycle."""
 
+import contextlib
 import os
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -188,15 +190,20 @@ def launch_headless(
     session = _create_session(request, store)
     child_pid = os.fork()
     if child_pid == 0:
-        os.setsid()
-        store.conn.close()
-        _supervise(
-            argv=request.target.as_cmd(),
-            cwd=request.cwd,
-            state_dir=state_dir,
-            session_id=request.session_id,
-            stop_timeout_seconds=stop_timeout_seconds,
-        )
+        try:
+            os.setsid()
+            store.conn.close()
+            _supervise(
+                argv=request.target.as_cmd(),
+                cwd=request.cwd,
+                state_dir=state_dir,
+                session_id=request.session_id,
+                stop_timeout_seconds=stop_timeout_seconds,
+            )
+        except BaseException:  # noqa: BLE001 — fork-safety: never let the child re-enter parent context
+            with contextlib.suppress(BaseException):
+                traceback.print_exc()
+            os._exit(1)
         os._exit(0)
     return session, child_pid
 

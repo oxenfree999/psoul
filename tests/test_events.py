@@ -128,3 +128,48 @@ def test_list_applies_filters(
         "test-session", event_type=event_type, after_sequence=after_sequence, generation=generation
     )
     assert [e["payload"] for e in events] == expected_payloads
+
+
+def _append(store: EventStore, etype: str, text: str) -> None:
+    store.append(session_id="test-session", event_type=etype, payload={"text": text}, generation=0)
+
+
+def test_list_recent_returns_empty_for_unknown_session(event_store: EventStore) -> None:
+    assert event_store.list_recent("does-not-exist") == []
+
+
+@pytest.mark.parametrize(
+    ("seed_count", "limit", "expected_seqs"),
+    [(5, 1000, list(range(5))), (20, 10, list(range(10, 20)))],
+    ids=["under-limit", "over-limit"],
+)
+def test_list_recent_returns_correct_window(
+    event_store: EventStore, seed_count: int, limit: int, expected_seqs: list[int]
+) -> None:
+    for i in range(seed_count):
+        _append(event_store, EVENT_RUNTIME_STDOUT, f"line {i}")
+    events = event_store.list_recent("test-session", limit=limit)
+    assert [e["sequence"] for e in events] == expected_seqs
+    assert [e["payload"] for e in events] == [{"text": f"line {i}"} for i in expected_seqs]
+
+
+def test_list_recent_filters_by_event_type(event_store: EventStore) -> None:
+    _append(event_store, EVENT_RUNTIME_STDOUT, "out1")
+    _append(event_store, EVENT_RUNTIME_STDERR, "err1")
+    _append(event_store, EVENT_RUNTIME_STDOUT, "out2")
+    events = event_store.list_recent("test-session", event_type=EVENT_RUNTIME_STDOUT, limit=1000)
+    assert [e["payload"] for e in events] == [{"text": "out1"}, {"text": "out2"}]
+
+
+def test_list_recent_uses_single_bounded_query(event_store: EventStore) -> None:
+    for i in range(5):
+        _append(event_store, EVENT_RUNTIME_STDOUT, f"line {i}")
+    captured: list[str] = []
+    event_store.conn.set_trace_callback(captured.append)
+    try:
+        event_store.list_recent("test-session", event_type=EVENT_RUNTIME_STDOUT, limit=3)
+    finally:
+        event_store.conn.set_trace_callback(None)
+    upper_sql = " ".join(captured).upper()
+    assert "ORDER BY SEQUENCE DESC" in upper_sql
+    assert "LIMIT" in upper_sql

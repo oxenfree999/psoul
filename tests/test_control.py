@@ -30,10 +30,13 @@ from psoul.core.control import (
     PendingCommand,
     SupervisedProc,
     _new_message_id,
+    _try_clean_acquire_controller,
     advance_restart_on_spawn_failure,
     advance_restart_on_spawn_success,
     check_escalation,
     emit_terminal_events,
+    handle_controller_acquired,
+    handle_controller_released,
     handle_kill,
     handle_pause_observed,
     handle_restart,
@@ -42,7 +45,7 @@ from psoul.core.control import (
     install_handlers,
 )
 from psoul.core.db import open_db
-from psoul.core.events import EventStore
+from psoul.core.events import EVENT_SESSION_CONTROLLER_ACQUIRED, EVENT_SESSION_CONTROLLER_RELEASED, EventStore
 from psoul.core.launch import LaunchRequest, LaunchTarget, launch_headless
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType
 from psoul.core.store import SessionStore
@@ -130,6 +133,15 @@ def _seed_running_session(store: SessionStore, session_id: str) -> None:
         )
     )
     store.update(session_id, state=SessionState.running)
+
+
+def _seed_dead_pid() -> int:
+    """Fork, exit in child, reap in parent, return the now-confirmed-dead PID."""
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+    return pid
 
 
 class _ExitedProc:
@@ -971,3 +983,143 @@ def test_handle_stop_or_kill_is_noop_when_restart_pending(
     assert session is not None
     assert session.state == SessionState.running  # row not transitioned
     assert state.restart_pending is existing  # restart bookkeeping untouched
+
+
+@pytest.mark.parametrize(
+    ("seed_controller", "expected_return", "expected_events"),
+    [(12345, True, [EVENT_SESSION_CONTROLLER_RELEASED]), (None, False, [])],
+    ids=["clears-and-emits", "noop-on-empty-row"],
+)
+def test_handle_controller_released(
+    stores: tuple[SessionStore, EventStore],
+    seed_controller: int | None,
+    expected_return: bool,
+    expected_events: list[str],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-release")
+    if seed_controller is not None:
+        store.update("sesh-release", controller_pid=seed_controller, control_acquired_at=datetime.now(UTC))
+    assert handle_controller_released(store, event_store, "sesh-release", 0) is expected_return
+    session = store.get("sesh-release")
+    assert session is not None
+    assert session.controller_pid is None
+    assert session.control_acquired_at is None
+    events = event_store.list("sesh-release")
+    assert [e["event_type"] for e in events] == expected_events
+    if expected_events:
+        assert cast("dict[str, object]", events[0]["payload"]) == {"session_id": "sesh-release"}
+
+
+def test_handle_controller_released_clear_and_event_are_committed_atomically(
+    stores: tuple[SessionStore, EventStore],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-atomic-release")
+    store.update("sesh-atomic-release", controller_pid=12345, control_acquired_at=datetime.now(UTC))
+    captured: list[str] = []
+    store.conn.set_trace_callback(captured.append)
+    try:
+        handle_controller_released(store, event_store, "sesh-atomic-release", 0)
+    finally:
+        store.conn.set_trace_callback(None)
+    sql_stream = " ".join(captured).upper()
+    update_idx = sql_stream.index("UPDATE SESSIONS SET CONTROLLER_PID = NULL")
+    insert_idx = sql_stream.index("INSERT INTO EVENTS")
+    assert update_idx < insert_idx
+    assert "COMMIT" not in sql_stream[update_idx:insert_idx]
+
+
+def _setup_acquired_scenario(store: SessionStore, session_id: str, setup: str) -> None:
+    if setup == "empty":
+        return
+    if setup == "dead-prior":
+        store.update(session_id, controller_pid=_seed_dead_pid(), control_acquired_at=datetime.now(UTC))
+        return
+    if setup == "live-prior":
+        store.update(session_id, controller_pid=os.getpid(), control_acquired_at=datetime.now(UTC))
+        return
+    msg = f"unknown setup: {setup}"
+    raise ValueError(msg)
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected_return", "expected_controller_pid", "expected_events"),
+    [
+        ("empty", 1, 99999, [EVENT_SESSION_CONTROLLER_ACQUIRED]),
+        ("dead-prior", 1, 99999, [EVENT_SESSION_CONTROLLER_RELEASED, EVENT_SESSION_CONTROLLER_ACQUIRED]),
+        ("live-prior", None, os.getpid(), []),
+    ],
+    ids=["empty-row", "dead-prior-reclaim", "live-prior"],
+)
+def test_handle_controller_acquired(
+    stores: tuple[SessionStore, EventStore],
+    setup: str,
+    expected_return: int | None,
+    expected_controller_pid: int,
+    expected_events: list[str],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-acq")
+    initial = store.get("sesh-acq")
+    assert initial is not None
+    _setup_acquired_scenario(store, "sesh-acq", setup)
+    actual = handle_controller_acquired(store, event_store, "sesh-acq", 0, client_pid=99999)
+    assert actual == expected_return
+    session = store.get("sesh-acq")
+    assert session is not None
+    assert session.controller_pid == expected_controller_pid
+    expected_epoch = initial.control_epoch + 1 if expected_return is not None else initial.control_epoch
+    assert session.control_epoch == expected_epoch
+    assert [e["event_type"] for e in event_store.list("sesh-acq")] == expected_events
+
+
+def test_handle_controller_acquired_release_and_acquired_events_are_committed_atomically(
+    stores: tuple[SessionStore, EventStore],
+) -> None:
+    store, event_store = stores
+    _seed_running_session(store, "sesh-atomic-acq")
+    store.update("sesh-atomic-acq", controller_pid=_seed_dead_pid(), control_acquired_at=datetime.now(UTC))
+    captured: list[str] = []
+    store.conn.set_trace_callback(captured.append)
+    try:
+        handle_controller_acquired(store, event_store, "sesh-atomic-acq", 0, client_pid=99999)
+    finally:
+        store.conn.set_trace_callback(None)
+    lower = [s.lower() for s in captured]
+    clear_idx = next(i for i, s in enumerate(lower) if "set controller_pid = null" in s)
+    assert "session.controller_released" in lower[clear_idx + 1]
+    acquire_idx = next(i for i, s in enumerate(lower) if i > clear_idx + 1 and "control_epoch + 1" in s)
+    assert "session.controller_acquired" in lower[acquire_idx + 1]
+
+
+def test_handle_controller_acquired_emits_released_only_when_re_acquire_loses_race(
+    stores: tuple[SessionStore, EventStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the post-clear re-acquire loses to another actor, only the released event lands."""
+    store, event_store = stores
+    _seed_running_session(store, "sesh-reacquire-race")
+    store.update("sesh-reacquire-race", controller_pid=_seed_dead_pid(), control_acquired_at=datetime.now(UTC))
+    call_count = {"n": 0}
+
+    def helper_wrapper(
+        store_arg: SessionStore,
+        event_store_arg: EventStore,
+        session_id: str,
+        generation: int,
+        client_pid: int,
+    ) -> int | None:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _try_clean_acquire_controller(store_arg, event_store_arg, session_id, generation, client_pid)
+        return None
+
+    monkeypatch.setattr("psoul.core.control._try_clean_acquire_controller", helper_wrapper)
+    result = handle_controller_acquired(store, event_store, "sesh-reacquire-race", 0, client_pid=99999)
+    assert result is None
+    session = store.get("sesh-reacquire-race")
+    assert session is not None
+    assert session.controller_pid is None
+    assert [e["event_type"] for e in event_store.list("sesh-reacquire-race")] == [EVENT_SESSION_CONTROLLER_RELEASED]
+    assert call_count["n"] == 2

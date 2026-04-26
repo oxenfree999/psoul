@@ -13,6 +13,11 @@ lint:
     uv run ty check
 
 # Run the test suite
+[unix]
+test *args:
+    uv run pytest --cov --cov-report=term-missing --cov-fail-under=90 {{ args }}
+
+[windows]
 test *args:
     uv run pytest --cov --cov-report=term-missing {{ args }}
 

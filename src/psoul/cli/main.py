@@ -25,6 +25,7 @@ from psoul.cli.repl import run_repl
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
 from psoul.core.artifacts import ArtifactStore
 from psoul.core.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
+from psoul.core.control import handle_controller_acquired, handle_controller_released
 from psoul.core.db import DB_NAME, open_db, resolve_state_dir
 from psoul.core.duration import parse_duration
 from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
@@ -33,6 +34,9 @@ from psoul.core.recovery import recover_sessions
 from psoul.core.session import TERMINAL_STATES, LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
+
+if sys.platform != "win32":
+    from psoul.cli.attach import run_attach_loop
 
 _SIGNAL_ACCEPT_STATES: frozenset[SessionState] = frozenset(
     {SessionState.running, SessionState.suspended, SessionState.orphaned}
@@ -575,6 +579,54 @@ def send_signal(
 ) -> None:
     """Send a named POSIX signal to a running, suspended, or orphaned headless session's process group."""
     _deliver_named_signal_to_pgroup(ctx, session_id, signal_name)
+
+
+@cli.command()
+def attach(
+    ctx: typer.Context,
+    session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
+) -> None:
+    """Attach interactively to a running headless session. Detach with Ctrl-]."""
+    if sys.platform == "win32":
+        print("Error: attach is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE)
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("Error: psoul attach requires a TTY", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE)
+    gs: GlobalState = ctx.obj
+    cfg = _load_resolved_config(gs.config_override)
+    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+        recover_sessions(conn)
+        store = SessionStore(conn)
+        try:
+            session = _resolve_session_selector(store, session_id)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE) from None
+        if session.launch_mode != LaunchMode.headless:
+            print(f"Error: attach requires a headless session: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.state not in {SessionState.running, SessionState.suspended}:
+            print(f"Error: cannot attach in state {session.state}: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        if session.socket_path is None:
+            print(f"Error: session has no listen socket: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR)
+        event_store = EventStore(conn)
+        client_pid = os.getpid()
+        new_epoch = handle_controller_acquired(store, event_store, session.session_id, session.generation, client_pid)
+        if new_epoch is None:
+            print(f"Error: session has another live controller: {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.USAGE)
+        try:
+            run_attach_loop(session.socket_path, client_pid)
+        except OSError as exc:
+            print(f"Error: attach failed ({exc}): {session.session_id}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from exc
+        finally:
+            handle_controller_released(
+                store, event_store, session.session_id, session.generation, controller_pid=client_pid
+            )
 
 
 @cli.command()
