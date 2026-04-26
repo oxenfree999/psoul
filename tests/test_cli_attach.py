@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import sys
 import time
 from contextlib import closing
@@ -12,6 +13,12 @@ import ptyprocess
 import pytest
 from typer.testing import CliRunner
 
+from psoul.cli.attach import (
+    _DETACH_ESCAPE,
+    _handle_socket_read,
+    _handle_stdin_read,
+    run_attach_loop,
+)
 from psoul.cli.main import cli
 from psoul.cli.state import ExitCode
 from psoul.core.db import open_db
@@ -19,6 +26,14 @@ from psoul.core.events import (
     EVENT_SESSION_CONTROLLER_ACQUIRED,
     EVENT_SESSION_CONTROLLER_RELEASED,
     EventStore,
+)
+from psoul.core.pty_spawn import (
+    _FRAME_DATA,
+    _FRAME_HELLO,
+    _cleanup_listen_socket,
+    _create_listen_socket,
+    _decode_frames,
+    _encode_frame,
 )
 from psoul.core.session import LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
@@ -28,6 +43,7 @@ runner = CliRunner()
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
 
 _DETACH_ESCAPE_BYTE = bytes([0x1D])
+_TEST_RECV_BUFSIZE = 1024  # bytes per recv() in attach-client tests, sized for small fixtures
 _PROC_STARTUP_GRACE = 0.5  # seconds to let the spawned attach client connect and send HELLO
 _RUNNING_TIMEOUT = 5.0
 
@@ -136,3 +152,99 @@ def test_attach_happy_path_detach_then_session_continues(tmp_path: Path, monkeyp
         proc.wait()
         runner.invoke(cli, ["kill", session_id])
         os.waitpid(supervisor_pid, 0)
+
+
+def test_handle_socket_read_writes_data_frames_to_stdout(capfd: pytest.CaptureFixture[str]) -> None:
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    b.setblocking(False)
+    with a, b:
+        a.sendall(_encode_frame(_FRAME_DATA, b"hello"))
+        buf = bytearray()
+        assert _handle_socket_read(b, buf) is True
+    captured = capfd.readouterr()
+    assert "hello" in captured.out
+
+
+def test_handle_socket_read_returns_false_on_eof() -> None:
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    b.setblocking(False)
+    a.close()
+    with b:
+        buf = bytearray()
+        assert _handle_socket_read(b, buf) is False
+
+
+@pytest.mark.parametrize(
+    ("input_bytes", "expected_detach", "expected_forwarded"),
+    [
+        (_DETACH_ESCAPE, True, b""),
+        (b"abc" + _DETACH_ESCAPE, True, b"abc"),
+        (b"abc", False, b"abc"),
+    ],
+    ids=["bare-escape", "pre-escape-bytes", "no-escape"],
+)
+def test_handle_stdin_read_partitions_on_escape(
+    monkeypatch: pytest.MonkeyPatch,
+    input_bytes: bytes,
+    expected_detach: bool,
+    expected_forwarded: bytes,
+) -> None:
+    pipe_r, pipe_w = os.pipe()
+    try:
+        os.write(pipe_w, input_bytes)
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"fileno": staticmethod(lambda: pipe_r)})())
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        a.setblocking(False)
+        with a, b:
+            assert _handle_stdin_read(b) is expected_detach
+            try:
+                received = a.recv(_TEST_RECV_BUFSIZE)
+            except BlockingIOError:
+                received = b""
+        if expected_forwarded:
+            frames = _decode_frames(bytearray(received))
+            assert any(k == _FRAME_DATA and p == expected_forwarded for k, p in frames)
+        else:
+            assert received == b""
+    finally:
+        os.close(pipe_r)
+        os.close(pipe_w)
+
+
+def test_handle_stdin_read_returns_true_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
+    pipe_r, pipe_w = os.pipe()
+    os.close(pipe_w)
+    try:
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"fileno": staticmethod(lambda: pipe_r)})())
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        with a, b:
+            assert _handle_stdin_read(b) is True
+    finally:
+        os.close(pipe_r)
+
+
+def test_handle_socket_read_returns_false_on_recv_oserror() -> None:
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    b.close()
+    with a:
+        assert _handle_socket_read(b, bytearray()) is False
+
+
+def test_run_attach_loop_connects_and_sends_hello(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_attach_loop`` connects to the listen socket and emits a HELLO frame, then yields to ``_io_loop``."""
+    listen_sock, listen_path = _create_listen_socket("run-attach-cov")
+    assert listen_sock is not None
+    assert listen_path is not None
+    try:
+        monkeypatch.setattr("psoul.cli.attach._io_loop", lambda _sock: None)
+        run_attach_loop(listen_path, 12345)
+        listen_sock.setblocking(True)
+        client_sock, _addr = listen_sock.accept()
+        try:
+            data = client_sock.recv(_TEST_RECV_BUFSIZE)
+        finally:
+            client_sock.close()
+        frames = _decode_frames(bytearray(data))
+        assert any(k == _FRAME_HELLO for k, _ in frames)
+    finally:
+        _cleanup_listen_socket(listen_sock, listen_path)

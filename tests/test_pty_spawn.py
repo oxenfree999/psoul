@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import termios
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, suppress
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 from ptyprocess import PtyProcess, PtyProcessError
 
+from psoul.core import control
 from psoul.core.db import open_db
 from psoul.core.events import EVENT_RUNTIME_STDOUT, EVENT_SESSION_CONTROLLER_RELEASED, EventStore
 from psoul.core.launch import LaunchMode, build_launch_request
@@ -28,9 +30,12 @@ from psoul.core.pty_spawn import (
     _FRAME_WINSIZE,
     _HELLO_PAYLOAD,
     _RESPAWN_BACKOFFS,
+    _TAG_CLIENT,
+    _TAG_LISTEN,
     _TAG_PTY_MAIN,
     _WINSIZE_STRUCT,
     ManagedChild,
+    _accept_attach_client,
     _AttachClient,
     _authenticate_attach_client,
     _cleanup_listen_socket,
@@ -39,12 +44,15 @@ from psoul.core.pty_spawn import (
     _disconnect_attach_client,
     _drain_tick,
     _encode_frame,
+    _fan_out_to_clients,
     _finalize_exit,
     _handle_attach_client_read,
     _poll_child_status,
     _respawn_with_backoff,
     _send_replay,
     _spawn_generation,
+    _supervise,
+    _supervise_loop,
 )
 from psoul.core.session import Session, SessionState
 from psoul.core.store import SessionStore
@@ -514,3 +522,152 @@ def test_disconnect_attach_client_releases(
         row = store.get(session_id)
         assert row is not None
         assert row.controller_pid == (None if expected_release_count == 1 else row_pid_after_auth)
+
+
+@pytest.mark.parametrize(
+    ("authenticated", "expected_received"),
+    [(True, True), (False, False)],
+    ids=["authenticated-receives", "unauthenticated-skipped"],
+)
+def test_fan_out_to_clients_routes_only_to_authenticated(
+    tmp_path: Path,
+    authenticated: bool,
+    expected_received: bool,
+) -> None:
+    session_id = "fan"
+    with closing(open_db(tmp_path)) as conn, _attach_socketpair() as (sender, client):
+        _seed_session(conn, session_id)
+        store = SessionStore(conn)
+        event_store = EventStore(conn)
+        client.authenticated = authenticated
+        clients = {client.sock.fileno(): client}
+        with selectors.DefaultSelector() as sel:
+            sel.register(client.sock.fileno(), selectors.EVENT_READ, _TAG_CLIENT)
+            _fan_out_to_clients(b"hello", sel, clients, store, event_store, session_id, 0)
+        try:
+            received = sender.recv(_TEST_RECV_BUFSIZE)
+        except BlockingIOError:
+            received = b""
+    if expected_received:
+        frames = _decode_frames(bytearray(received))
+        assert any(k == _FRAME_DATA and p == b"hello" for k, p in frames)
+    else:
+        assert received == b""
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_supervise_loop_dispatches_attach_client_in_process(tmp_path: Path) -> None:
+    """In-process drive of ``_supervise_loop`` end-to-end. Covers accept, HELLO auth, replay, fan-out, and teardown."""
+    session_id = "sup-int"
+    controller_pid = os.getpid()
+    with closing(open_db(tmp_path)) as conn:
+        _seed_session(conn, session_id, controller_pid=controller_pid)
+        store = SessionStore(conn)
+        store.update(session_id, state=SessionState.running)
+        EventStore(conn).append(
+            session_id=session_id, event_type=EVENT_RUNTIME_STDOUT, payload={"text": "seeded\n"}, generation=0
+        )
+    listen_sock, listen_path = _create_listen_socket(session_id)
+    assert listen_sock is not None
+    assert listen_path is not None
+    pty_child = _spawn_pty_child(
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.readline()); sys.stdout.flush()"]
+    )
+    captured = bytearray()
+
+    def _client_runner() -> None:
+        time.sleep(0.2)
+        client_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client_sock.connect(str(listen_path))
+            client_sock.sendall(_encode_frame(_FRAME_HELLO, _HELLO_PAYLOAD.pack(controller_pid)))
+            time.sleep(0.2)
+            client_sock.sendall(_encode_frame(_FRAME_DATA, b"x\n"))
+            client_sock.settimeout(2.0)
+            with suppress(TimeoutError, OSError):
+                while True:
+                    chunk = client_sock.recv(_TEST_RECV_BUFSIZE)
+                    if not chunk:
+                        break
+                    captured.extend(chunk)
+        finally:
+            client_sock.close()
+
+    client_thread = threading.Thread(target=_client_runner)
+    client_thread.start()
+    try:
+        with closing(open_db(tmp_path)) as conn:
+            _supervise_loop(
+                pty_child,
+                listen_socket=listen_sock,
+                session_id=session_id,
+                event_store=EventStore(conn),
+                generation=0,
+                store=SessionStore(conn),
+                control_state=control.ControlState(),
+                stop_timeout_seconds=10.0,
+            )
+        client_thread.join(timeout=3.0)
+        assert not client_thread.is_alive()
+        assert pty_child.poll() == 0
+        frames = _decode_frames(bytearray(captured))
+        replay_payload = b"".join(p for k, p in frames if k == _FRAME_DATA)
+        assert b"seeded" in replay_payload
+        assert b"x" in replay_payload
+    finally:
+        _cleanup_pty_child(pty_child)
+        _cleanup_listen_socket(listen_sock, listen_path)
+
+
+def test_accept_attach_client_registers_new_client_with_selector() -> None:
+    listen_sock, listen_path = _create_listen_socket("accept-test")
+    assert listen_sock is not None
+    assert listen_path is not None
+    try:
+        with selectors.DefaultSelector() as sel, closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as peer:
+            sel.register(listen_sock.fileno(), selectors.EVENT_READ, _TAG_LISTEN)
+            peer.connect(str(listen_path))
+            clients: dict[int, _AttachClient] = {}
+            _accept_attach_client(listen_sock, sel, clients)
+            assert len(clients) == 1
+            accepted_fd = next(iter(clients))
+            assert clients[accepted_fd].authenticated is False
+            assert sel.get_key(accepted_fd).data == _TAG_CLIENT
+            clients[accepted_fd].sock.close()
+    finally:
+        _cleanup_listen_socket(listen_sock, listen_path)
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_supervise_runs_fast_exiting_child_to_completion(tmp_path: Path) -> None:
+    """In-process ``_supervise`` runs a fast-exiting child end-to-end. Covers the outer body."""
+    session_id = "sup-outer"
+    with closing(open_db(tmp_path)) as conn:
+        SessionStore(conn).create(
+            Session(
+                session_id=session_id,
+                state=SessionState.starting,
+                launch_mode=LaunchMode.headless,
+                launch_time=datetime.now(UTC),
+                psoul_version=VERSION,
+            )
+        )
+    saved_sigusr1 = signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+    saved_sigusr2 = signal.signal(signal.SIGUSR2, signal.SIG_DFL)
+    saved_sighup = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    try:
+        _supervise(
+            argv=[sys.executable, "-c", "pass"],
+            cwd=Path.cwd(),
+            state_dir=tmp_path,
+            session_id=session_id,
+            stop_timeout_seconds=10.0,
+        )
+        with closing(open_db(tmp_path)) as conn:
+            session = SessionStore(conn).get(session_id)
+        assert session is not None
+        assert session.state == SessionState.exited
+    finally:
+        signal.signal(signal.SIGUSR1, saved_sigusr1)
+        signal.signal(signal.SIGUSR2, saved_sigusr2)
+        signal.signal(signal.SIGHUP, saved_sighup)
