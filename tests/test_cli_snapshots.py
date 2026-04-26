@@ -60,6 +60,8 @@ def test_main_help() -> None:
 │ resume     Unfreeze a suspended headless session (SIGCONT).                  │
 │ signal     Send a named POSIX signal to a running, suspended, or orphaned    │
 │            headless session's process group.                                 │
+│ attach     Attach interactively to a running headless session. Detach with   │
+│            Ctrl-].                                                           │
 │ ps         List sessions.                                                    │
 │ status     Show session detail.                                              │
 │ logs       Print captured stdout/stderr for a session.                       │
@@ -240,6 +242,25 @@ def test_signal_help() -> None:
 │ *    session_id       TEXT  Session ID or unique prefix. [required]          │
 │ *    signal_name      TEXT  Signal name (e.g., TERM, USR1, SIGUSR1).         │
 │                             [required]                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_attach_help() -> None:
+    result = runner.invoke(cli, ["attach", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul attach [OPTIONS] SESSION_ID                                       \n\
+                                                                                \n\
+ Attach interactively to a running headless session. Detach with Ctrl-].        \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    session_id      TEXT  Session ID or unique prefix. [required]           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                │
