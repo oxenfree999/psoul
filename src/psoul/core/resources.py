@@ -22,8 +22,10 @@ def _collect(process: psutil.Process) -> dict[str, object]:
 
     Returns a dict matching the ``resource_samples`` column names.
     Fields that aren't available on the current platform (e.g.
-    ``disk_read_mb`` on macOS) are ``None``.  Raises
-    ``psutil.NoSuchProcess`` if the process has exited.
+    ``disk_read_mb`` on macOS) are ``None``. Raises
+    ``psutil.NoSuchProcess`` if the process has exited and been
+    reaped, or ``psutil.ZombieProcess`` if the process exited but
+    is still in the kernel's process table awaiting reap.
     """
     cpu = process.cpu_percent()
     mem = process.memory_info()
@@ -114,7 +116,7 @@ class ResourceSampler:
                     metrics = _collect(self._process)
                     metrics.update(gpu.read())
                     self._persist(metrics, conn, event_store)
-                except psutil.NoSuchProcess:
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
                     break
                 self._stop_event.wait(interval)  # interruptible sleep
 
