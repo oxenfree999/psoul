@@ -116,8 +116,17 @@ def test_gpu_metrics_flow_to_row_and_event(tmp_path: Path, monkeypatch: pytest.M
         assert payload["gpu_power_watts"] == 75.0
 
 
-def test_run_exits_on_process_death(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """run() exits cleanly when the target process disappears mid-sample."""
+@pytest.mark.parametrize(
+    "raised",
+    [psutil.NoSuchProcess, psutil.ZombieProcess],
+    ids=["nosuchprocess", "zombieprocess"],
+)
+def test_run_exits_on_process_death(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raised: type[psutil.Error],
+) -> None:
+    """run() exits cleanly when psutil reports the target process gone or zombie mid-sample."""
     _seed_session(tmp_path)
     sampler = ResourceSampler(psutil.Process(), tmp_path, SESSION_ID, generation=0)
     call_count = 0
@@ -127,11 +136,11 @@ def test_run_exits_on_process_death(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
-            raise psutil.NoSuchProcess(pid=self.pid)
+            raise raised(pid=self.pid)
         return original_collect(self, interval)
 
     monkeypatch.setattr(psutil.Process, "cpu_percent", dying_cpu)
-    sampler.run(interval=0.01)  # blocks until NoSuchProcess
+    sampler.run(interval=0.01)
     assert call_count == 2
 
 

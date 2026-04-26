@@ -490,8 +490,8 @@ def _spawn_generation(
         ps_process = psutil.Process(pty_child.pid)
         sampler = ResourceSampler(ps_process, state_dir, session_id, generation)
         sampler_thread = threading.Thread(target=sampler.run, args=(_SAMPLE_INTERVAL,), daemon=True)
-    except psutil.NoSuchProcess:
-        pass  # child already exited; skip sampling, supervise loop still finalizes
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        pass  # child already exited or is a zombie awaiting reap. Skip sampling, supervise loop still finalizes.
     return pty_child, sampler, sampler_thread
 
 
