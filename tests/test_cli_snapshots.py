@@ -49,6 +49,7 @@ def test_main_help() -> None:
 ╭─ Commands ───────────────────────────────────────────────────────────────────╮
 │ repl       Start an interactive REPL session.                                │
 │ doctor     Check psoul environment and report status.                        │
+│ env        Show a curated Python environment summary.                        │
 │ run        Launch a Python target as a managed session.                      │
 │ stop       Stop a running or suspended headless session. Escalates to        │
 │            SIGKILL after the stop_timeout grace period.                      │
@@ -102,6 +103,26 @@ def test_doctor_help() -> None:
                                                                                 \n\
  Check psoul environment and report status.                                     \n\
                                                                                 \n\
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --json            Output JSON instead of text.                               │
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_env_help() -> None:
+    result = runner.invoke(cli, ["env", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul env [OPTIONS] [SESSION_ID]                                        \n\
+                                                                                \n\
+ Show a curated Python environment summary.                                     \n\
+                                                                                \n\
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│   session_id      [SESSION_ID]  Session ID or unique prefix.                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────╮
 │ --json            Output JSON instead of text.                               │
 │ --help  -h        Show this message and exit.                                │

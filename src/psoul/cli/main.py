@@ -20,6 +20,8 @@ import typer
 from typer.core import TyperGroup
 
 from psoul.cli.doctor import format_text, get_system_info
+from psoul.cli.env import format_text as format_env_text
+from psoul.cli.env import get_current_env, get_session_env
 from psoul.cli.logging import configure_logging, resolve_log_level
 from psoul.cli.prune import PruneState, run_prune
 from psoul.cli.repl import run_repl
@@ -237,6 +239,33 @@ def doctor(
         print(json.dumps(info, indent=2))
     else:
         print(format_text(info))
+
+
+@cli.command()
+def env(
+    ctx: typer.Context,
+    session_id: Annotated[str | None, typer.Argument(help="Session ID or unique prefix.")] = None,
+    json_flag: Annotated[bool, typer.Option("--json", help="Output JSON instead of text.")] = False,
+) -> None:
+    """Show a curated Python environment summary."""
+    if session_id is None:
+        info = get_current_env()
+    else:
+        gs: GlobalState = ctx.obj
+        cfg = _load_resolved_config(gs.config_override)
+        state_dir = resolve_state_dir(cfg.paths.state_dir)
+        try:
+            with closing(_open_db_or_exit(state_dir)) as conn:
+                recover_sessions(conn)
+                session = _resolve_session_selector(SessionStore(conn), session_id)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from None
+        info = get_session_env(session)
+    if json_flag:
+        print(json.dumps(info, default=str, indent=2))
+    else:
+        print(format_env_text(info))
 
 
 config_app = typer.Typer(name="config", help="Show and manage configuration.")
