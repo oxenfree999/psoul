@@ -48,6 +48,7 @@ from psoul.core.pty_spawn import (
     _finalize_exit,
     _handle_attach_client_read,
     _poll_child_status,
+    _reap_descendants,
     _respawn_with_backoff,
     _send_replay,
     _spawn_generation,
@@ -147,6 +148,66 @@ def test_poll_child_status_syncs_returncode_on_exit() -> None:
         assert pty_child.returncode == 42
     finally:
         _cleanup_pty_child(pty_child)
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_reap_descendants_returns_when_no_zombies() -> None:
+    pty_child: ManagedChild | None = None
+    try:
+        pty_child = _spawn_pty_child([sys.executable, "-c", "import time; time.sleep(30)"])
+        _reap_descendants(pty_child)
+        assert pty_child.returncode is None
+    finally:
+        if pty_child is not None:
+            _cleanup_pty_child(pty_child)
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_reap_descendants_drains_unrelated_zombie() -> None:
+    pty_child: ManagedChild | None = None
+    orphan_pid: int | None = None
+    try:
+        pty_child = _spawn_pty_child([sys.executable, "-c", "import time; time.sleep(30)"])
+        orphan_pid = os.fork()
+        if orphan_pid == 0:
+            os._exit(0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            _reap_descendants(pty_child)
+            try:
+                os.kill(orphan_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"helper did not reap orphan {orphan_pid} within 2s")
+        assert pty_child.returncode is None
+    finally:
+        if orphan_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(orphan_pid, signal.SIGKILL)
+            with suppress(ChildProcessError):
+                os.waitpid(orphan_pid, 0)
+        if pty_child is not None:
+            _cleanup_pty_child(pty_child)
+
+
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+def test_reap_descendants_syncs_managed_child_returncode() -> None:
+    pty_child: ManagedChild | None = None
+    try:
+        pty_child = _spawn_pty_child([sys.executable, "-c", "import time; time.sleep(30)"])
+        os.kill(pty_child.pid, signal.SIGKILL)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and pty_child.returncode is None:
+            _reap_descendants(pty_child)
+            if pty_child.returncode is not None:
+                break
+            time.sleep(0.02)
+        assert pty_child.returncode == -signal.SIGKILL
+    finally:
+        if pty_child is not None:
+            _cleanup_pty_child(pty_child)
 
 
 @pytest.mark.parametrize(

@@ -1,11 +1,14 @@
 """PTY-backed spawn and supervise for headless sessions. Unix only."""
 
+import ctypes
 import errno
 import fcntl
+import logging
 import os
 import selectors
 import socket
 import struct
+import sys
 import termios
 import threading
 import time
@@ -26,9 +29,19 @@ from psoul.core.resources import ResourceSampler
 from psoul.core.session import Session, SessionState
 from psoul.core.store import SessionStore
 
+_logger = logging.getLogger(__name__)
+
 _SAMPLE_INTERVAL = 2.0  # seconds between resource samples
 _SUPERVISE_TICK = 0.1  # seconds per supervise-loop iteration
 _RESPAWN_BACKOFFS: tuple[float, ...] = (1.0, 2.0, 4.0)  # sleep before each retry when a restart respawns the child
+_DESCENDANT_GRACE_SECONDS = (
+    5.0  # seconds the supervisor lingers reaping reparented descendants after the managed child exits
+)
+_PR_SET_CHILD_SUBREAPER = 36  # Linux prctl option, kernel 3.4+, hardcoded to avoid a one-constant ctypes binding dep
+_DRAIN_POLL_INTERVAL = 0.05  # seconds between descendant-drain ticks
+_DRAIN_STABILIZATION = (
+    0.2  # seconds the drain lingers after detecting empty descendants, so observers see the empty state
+)
 
 _FRAME_DATA = 0x01
 _FRAME_WINSIZE = 0x02
@@ -340,6 +353,57 @@ def _poll_child_status(pty_child: ManagedChild) -> str | None:
     return "exited"
 
 
+def _set_subreaper() -> None:
+    """Ask the kernel to reparent orphan descendants to this process. Linux 3.4+ only, no-op elsewhere."""
+    if sys.platform != "linux":
+        return
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    except OSError as exc:
+        _logger.warning("libc.so.6 unavailable, subreaper not set: %s", exc)
+        return
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        _logger.warning(
+            "prctl(PR_SET_CHILD_SUBREAPER) failed errno=%d, orphan grandchildren may escape to PID 1",
+            ctypes.get_errno(),
+        )
+
+
+def _reap_descendants(pty_child: ManagedChild) -> None:
+    """Reap zombie descendants. Sync ``pty_child.returncode`` if the wildcard waitpid reaps the managed child."""
+    while True:
+        try:
+            wait_pid, sts = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if wait_pid == 0:
+            return
+        if wait_pid == pty_child.pid and pty_child.returncode is None:
+            if os.WIFEXITED(sts):
+                pty_child.returncode = os.WEXITSTATUS(sts)
+            elif os.WIFSIGNALED(sts):
+                pty_child.returncode = -os.WTERMSIG(sts)
+
+
+def _drain_descendants(pty_child: ManagedChild) -> None:
+    """Linger past managed-child exit reaping reparented descendants, bounded by ``_DESCENDANT_GRACE_SECONDS``."""
+    deadline = time.monotonic() + _DESCENDANT_GRACE_SECONDS
+    ever_had_descendants = False
+    while time.monotonic() < deadline:
+        _reap_descendants(pty_child)
+        try:
+            children = psutil.Process().children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return
+        if children:
+            ever_had_descendants = True
+            time.sleep(_DRAIN_POLL_INTERVAL)
+            continue
+        if ever_had_descendants:
+            time.sleep(_DRAIN_STABILIZATION)
+        return
+
+
 def _supervise_select_tick(
     selector: selectors.DefaultSelector,
     listen_socket: socket.socket | None,
@@ -421,6 +485,7 @@ def _supervise_loop(
                         control_state, pty_child, event_store, session_id, generation, stop_timeout_seconds, store
                     )
                 control.check_escalation(control_state, pty_child)
+                _reap_descendants(pty_child)
             while selector.get_map() and _drain_tick(
                 selector, event_store, session_id, generation, _SUPERVISE_TICK, clients, store
             ):
@@ -578,6 +643,7 @@ def _supervise(
     the restart with ``command.failed(restart, ...)`` instead of
     escaping the supervisor.
     """
+    _set_subreaper()
     conn = open_db(state_dir)
     listen_socket: socket.socket | None = None
     socket_path: Path | None = None
@@ -618,6 +684,7 @@ def _supervise(
                     sampler_thread.join()
             if control_state.restart_pending is None:
                 _finalize_exit(pty_child, session_id, sup_store, start_mono)
+                _drain_descendants(pty_child)
                 break
             _finalize_exit(pty_child, session_id, sup_store, start_mono, in_restart=True)
             sup_store.update(session_id, state=SessionState.restarting)

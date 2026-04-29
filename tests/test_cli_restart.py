@@ -282,7 +282,10 @@ def test_restart_from_suspended_session(tmp_path: Path, monkeypatch: pytest.Monk
     config.write_text('[process]\nstop_timeout = "1s"\n')
     script = tmp_path / "ignore_term.py"
     script.write_text(
-        "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nwhile True: time.sleep(0.05)\n"
+        "import pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(__file__).parent.joinpath('child_ready').touch()\n"
+        "while True: time.sleep(0.05)\n"
     )
     launch = runner.invoke(cli, ["--config", str(config), "run", "--headless", str(script)])
     assert launch.exit_code == 0
@@ -290,6 +293,11 @@ def test_restart_from_suspended_session(tmp_path: Path, monkeypatch: pytest.Monk
     session_id = info["session_id"]
     supervisor_pid = info["supervisor_pid"]
     _wait_for_generation_running(tmp_path, session_id, target_gen=0)
+    ready_file = tmp_path / "child_ready"
+    ready_deadline = time.monotonic() + 5.0
+    while time.monotonic() < ready_deadline and not ready_file.exists():
+        time.sleep(0.02)
+    assert ready_file.exists(), "child did not signal ready within 5s"
     assert runner.invoke(cli, ["--config", str(config), "pause", session_id]).exit_code == 0
     _wait_for_state(tmp_path, session_id, SessionState.suspended)
     restart = runner.invoke(cli, ["--config", str(config), "restart", session_id])
@@ -309,7 +317,10 @@ def test_restart_child_ignoring_sigterm_escalates_to_sigkill(tmp_path: Path, mon
     config.write_text('[process]\nstop_timeout = "1s"\n')
     script = tmp_path / "ignore_term.py"
     script.write_text(
-        "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nwhile True: time.sleep(0.05)\n"
+        "import pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(__file__).parent.joinpath('child_ready').touch()\n"
+        "while True: time.sleep(0.05)\n"
     )
     launch = runner.invoke(cli, ["--config", str(config), "run", "--headless", str(script)])
     assert launch.exit_code == 0
@@ -317,6 +328,11 @@ def test_restart_child_ignoring_sigterm_escalates_to_sigkill(tmp_path: Path, mon
     session_id = info["session_id"]
     supervisor_pid = info["supervisor_pid"]
     _wait_for_generation_running(tmp_path, session_id, target_gen=0)
+    ready_file = tmp_path / "child_ready"
+    ready_deadline = time.monotonic() + 5.0
+    while time.monotonic() < ready_deadline and not ready_file.exists():
+        time.sleep(0.02)
+    assert ready_file.exists(), "child did not signal ready within 5s"
     restart = runner.invoke(cli, ["--config", str(config), "restart", session_id])
     assert restart.exit_code == 0
     _wait_for_generation_running(tmp_path, session_id, target_gen=1)

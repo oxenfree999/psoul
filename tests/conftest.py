@@ -9,6 +9,9 @@ if sys.platform == "win32":
     # ptyprocess is a Unix-only dependency. Skip collecting tests that import it on Windows.
     collect_ignore_glob.append("test_pty_spawn.py")
     collect_ignore_glob.append("test_cli_attach.py")
+if sys.platform != "linux":
+    # PR_SET_CHILD_SUBREAPER is Linux-only. Skip the integration test on macOS and Windows.
+    collect_ignore_glob.append("test_subreaper.py")
 
 
 @pytest.fixture(autouse=True)
