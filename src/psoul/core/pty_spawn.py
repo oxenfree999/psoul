@@ -37,7 +37,7 @@ _RESPAWN_BACKOFFS: tuple[float, ...] = (1.0, 2.0, 4.0)  # sleep before each retr
 _DESCENDANT_GRACE_SECONDS = (
     5.0  # seconds the supervisor lingers reaping reparented descendants after the managed child exits
 )
-_PR_SET_CHILD_SUBREAPER = 38  # Linux prctl option, kernel 3.4+, hardcoded to avoid a one-constant ctypes binding dep
+_PR_SET_CHILD_SUBREAPER = 36  # Linux prctl option, kernel 3.4+, hardcoded to avoid a one-constant ctypes binding dep
 _DRAIN_POLL_INTERVAL = 0.05  # seconds between descendant-drain ticks
 _DRAIN_STABILIZATION = (
     0.2  # seconds the drain lingers after detecting empty descendants, so observers see the empty state
