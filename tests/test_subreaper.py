@@ -21,6 +21,7 @@ _FIXTURE_SCRIPT = (
     "new_ppid_file = pathlib.Path(sys.argv[2])\n"
     "parent_pid = os.getpid()\n"
     "if os.fork() == 0:\n"
+    "    os.setsid()\n"
     "    grandchild_pid_file.write_text(str(os.getpid()))\n"
     "    deadline = time.monotonic() + 5.0\n"
     "    while time.monotonic() < deadline and os.getppid() == parent_pid:\n"
