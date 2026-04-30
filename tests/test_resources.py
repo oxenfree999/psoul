@@ -118,8 +118,8 @@ def test_gpu_metrics_flow_to_row_and_event(tmp_path: Path, monkeypatch: pytest.M
 
 @pytest.mark.parametrize(
     "raised",
-    [psutil.NoSuchProcess, psutil.ZombieProcess],
-    ids=["nosuchprocess", "zombieprocess"],
+    [psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied],
+    ids=["nosuchprocess", "zombieprocess", "accessdenied"],
 )
 def test_run_exits_on_process_death(
     tmp_path: Path,
