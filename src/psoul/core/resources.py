@@ -24,8 +24,11 @@ def _collect(process: psutil.Process) -> dict[str, object]:
     Fields that aren't available on the current platform (e.g.
     ``disk_read_mb`` on macOS) are ``None``. Raises
     ``psutil.NoSuchProcess`` if the process has exited and been
-    reaped, or ``psutil.ZombieProcess`` if the process exited but
-    is still in the kernel's process table awaiting reap.
+    reaped, ``psutil.ZombieProcess`` if the process exited but
+    is still in the kernel's process table awaiting reap, or
+    ``psutil.AccessDenied`` if ``/proc/<pid>/io`` becomes
+    unreadable between samples (typically a PID-reuse race after
+    the child is reaped).
     """
     cpu = process.cpu_percent()
     mem = process.memory_info()
@@ -116,7 +119,7 @@ class ResourceSampler:
                     metrics = _collect(self._process)
                     metrics.update(gpu.read())
                     self._persist(metrics, conn, event_store)
-                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                except psutil.Error:
                     break
                 self._stop_event.wait(interval)  # interruptible sleep
 
