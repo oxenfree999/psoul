@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.4] - 2026-04-29
+
+Control plane and interactive takeover. Stop, kill, pause, resume, restart, or signal a session, attach to a running headless session, prune old data, and inspect the active Python environment.
+
+### Added
+
+- `psoul stop <session>` sends SIGTERM and escalates to SIGKILL after the configured timeout.
+- `psoul kill <session>` sends SIGKILL immediately.
+- `psoul pause <session>` suspends a session via SIGSTOP.
+- `psoul resume <session>` resumes a suspended session via SIGCONT.
+- `psoul restart <session>` terminates the current run and respawns the session, preserving its history.
+- `psoul signal <session> <name>` delivers an arbitrary signal by name (for example, `SIGUSR1`).
+- `psoul attach <session>` connects an interactive PTY to a running headless session — type at the child, see its output, detach with `Ctrl-]`.
+- `psoul prune` deletes finished sessions and their artifacts. Filter with `--all`, `--older-than`, `--state`, or `--tag`. Pass `--force` to also delete active sessions.
+- `psoul env` prints a curated Python environment summary — the running process by default, or a recorded session's launch-time snapshot when given a session ID (`psoul env <session>`).
+
+### Fixed
+
+- `psoul script.py | grep foo` no longer auto-promotes to headless mode when stdin is not a terminal — it now mirrors `python script.py | grep foo`.
+- The resource sampler no longer crashes when a session exits fast enough to enter zombie state before its first sample.
+
 ## [0.0.3] - 2026-04-17
 
 Core observability and GPU telemetry. See what a session is doing — live output, the full event log, CPU/memory/GPU usage, and registered artifacts.
@@ -46,6 +67,7 @@ Initial release. Project foundation and core CLI.
 - Inline snapshot tests for CLI output.
 - CI on Ubuntu, macOS, and Windows across Python 3.12, 3.13, and 3.14.
 
+[0.0.4]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.4
 [0.0.3]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.3
 [0.0.2]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.2
 [0.0.1]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.1

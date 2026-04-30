@@ -323,4 +323,4 @@ def test_prune_help() -> None:
 def test_version_output_snapshot() -> None:
     result = runner.invoke(cli, ["version"])
     assert result.exit_code == 0
-    assert result.output == snapshot("psoul 0.0.3\n")
+    assert result.output == snapshot("psoul 0.0.4\n")
