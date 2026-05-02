@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+Sessions are now ephemeral by default. Pass `--record` to opt in to persistence.
+
+### Changed
+
+- `psoul run` and `psoul repl` no longer record to disk by default. Pass `--record`, set `[session] record = true` in config, or launch with `--headless` to opt in.
+- Read-side commands (`ps`, `status`, `events`, `logs`, `stats`, `artifacts`, `env <session>`, `prune`) exit 0 with a single-line stderr message on a fresh home with no recorded sessions.
+- Control-side commands (`stop`, `kill`, `pause`, `resume`, `restart`, `signal`, `attach`) exit with a usage error and the same stderr message on a fresh home.
+- Existing session data from v0.0.4 stays in place. Use `psoul prune --all` to start fresh.
+
+### Added
+
+- `--record/-r` flag on `psoul run` and `psoul repl`.
+- `[session] record` config option.
+
 ## [0.0.4] - 2026-04-29
 
 Control plane and interactive takeover. Stop, kill, pause, resume, restart, or signal a session, attach to a running headless session, prune old data, and inspect the active Python environment.
