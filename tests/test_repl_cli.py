@@ -165,7 +165,7 @@ class TestReplCLI:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         config = tmp_path / "psoul.toml"
-        config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n")
+        config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n[session]\nrecord = true\n")
         calls: list[tuple[str, Path]] = []
         monkeypatch.setattr("psoul.cli.main.resolve_session_id", lambda _name: "bare-repl")
         monkeypatch.setattr(
@@ -183,9 +183,25 @@ class TestReplCLI:
 
     def test_duplicate_name_rejected(self, tmp_path: Path) -> None:
         config = _seed_session(tmp_path, "taken")
-        result = runner.invoke(cli, ["--config", str(config), "repl", "--name", "taken"])
+        result = runner.invoke(cli, ["--config", str(config), "repl", "--record", "--name", "taken"])
         assert result.exit_code != 0
         assert "already exists" in result.output
+
+    def test_no_record_runs_ephemeral_repl(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`psoul repl` (no --record, default config) runs the ephemeral REPL: no DB, no row."""
+        monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+
+        class FakePromptSession:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def prompt(self, _message: str) -> str:
+                raise EOFError
+
+        monkeypatch.setattr("psoul.cli.repl.PromptSession", FakePromptSession)
+        result = runner.invoke(cli, ["repl"])
+        assert result.exit_code == 0
+        assert not (tmp_path / "psoul.db").exists()
 
 
 def _prompt_with_keys(keys: str) -> str:

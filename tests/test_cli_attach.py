@@ -71,6 +71,7 @@ def _write_test_config(tmp_path: Path) -> Path:
 def test_attach_rejects_non_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """CliRunner's default non-TTY stdin/stdout triggers a USAGE-coded error."""
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    open_db(tmp_path).close()
     result = runner.invoke(cli, ["attach", "any-session"])
     assert result.exit_code == ExitCode.USAGE
     assert "TTY" in result.output

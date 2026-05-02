@@ -320,6 +320,48 @@ def test_prune_help() -> None:
 """)
 
 
+def test_repl_help() -> None:
+    result = runner.invoke(cli, ["repl", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul repl [OPTIONS]                                                    \n\
+                                                                                \n\
+ Start an interactive REPL session.                                             \n\
+                                                                                \n\
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --name            TEXT  Session ID.                                          │
+│ --tag             TEXT  Tag as key=value (repeatable).                       │
+│ --record  -r            Save this session so `psoul ps` and other commands   │
+│                         can find it.                                         │
+│ --help    -h            Show this message and exit.                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
+def test_run_help() -> None:
+    result = runner.invoke(cli, ["run", "--help"])
+    assert result.exit_code == 0
+    assert typer.unstyle(result.output) == snapshot("""\
+                                                                                \n\
+ Usage: psoul run [OPTIONS]                                                     \n\
+                                                                                \n\
+ Launch a Python target as a managed session.                                   \n\
+                                                                                \n\
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│             -m      TEXT  Module to run.                                     │
+│ --name              TEXT  Session ID.                                        │
+│ --headless                Launch in background.                              │
+│ --tag               TEXT  Tag as key=value (repeatable).                     │
+│ --record    -r            Save this session so `psoul ps` and other commands │
+│                           can find it.                                       │
+│ --help      -h            Show this message and exit.                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+""")
+
+
 def test_version_output_snapshot() -> None:
     result = runner.invoke(cli, ["version"])
     assert result.exit_code == 0

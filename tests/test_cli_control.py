@@ -164,6 +164,7 @@ def test_resume_cli_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_stop_unknown_session_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A selector that matches no session surfaces a session-not-found error."""
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    open_db(tmp_path).close()
     result = runner.invoke(cli, ["stop", "does-not-exist"])
     assert result.exit_code == ExitCode.USAGE
     assert "session not found" in result.output
@@ -397,6 +398,7 @@ def test_kill_on_suspended_session_terminates_immediately(tmp_path: Path, monkey
 @pytest.mark.parametrize("command", ["pause", "resume"], ids=["pause", "resume"])
 def test_pause_resume_unknown_selector(command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    open_db(tmp_path).close()
     result = runner.invoke(cli, [command, "does-not-exist"])
     assert result.exit_code == ExitCode.USAGE
     assert "session not found" in result.output
@@ -803,6 +805,7 @@ def test_signal_rejects_non_accept_state(
 
 def test_signal_unknown_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    open_db(tmp_path).close()
     result = runner.invoke(cli, ["signal", "does-not-exist", "TERM"])
     assert result.exit_code == ExitCode.USAGE
     assert "session not found" in result.output

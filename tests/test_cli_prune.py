@@ -49,8 +49,14 @@ def _insert_result(conn: sqlite3.Connection, session_id: str, end_time: datetime
 
 @pytest.fixture
 def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect psoul to use *tmp_path* as its state directory."""
+    """Redirect psoul to use *tmp_path* as its state directory.
+
+    Pre-creates the DB so existing validation tests hit validation rather
+    than the no-DB short-circuit. Tests that exercise the no-DB path use
+    their own fixture or skip this one.
+    """
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    open_db(tmp_path).close()
     return tmp_path
 
 
