@@ -12,7 +12,7 @@ import sys
 import termios
 import threading
 import time
-from contextlib import suppress
+from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -644,80 +644,81 @@ def _supervise(
     escaping the supervisor.
     """
     _set_subreaper()
-    conn = open_db(state_dir)
-    listen_socket: socket.socket | None = None
-    socket_path: Path | None = None
-    try:
-        listen_socket, socket_path = _create_listen_socket(session_id)
-        sup_store = SessionStore(conn)
-        event_store = EventStore(conn)
-        control_state = control.ControlState()
-        control.install_handlers(control_state)
-        generation = 0
-        pty_child, sampler, sampler_thread = _spawn_generation(argv, cwd, state_dir, session_id, generation=generation)
-        sup_store.update(
-            session_id,
-            state=SessionState.running,
-            supervisor_pid=os.getpid(),
-            socket_path=socket_path,
-        )
-        while True:
-            if sampler_thread is not None:
-                sampler_thread.start()
-            start_mono = time.monotonic()
-            try:
-                _supervise_loop(
-                    pty_child,
-                    listen_socket=listen_socket,
-                    session_id=session_id,
-                    event_store=event_store,
-                    generation=generation,
-                    store=sup_store,
-                    control_state=control_state,
-                    stop_timeout_seconds=stop_timeout_seconds,
-                )
-                control.emit_terminal_events(control_state, event_store, session_id, generation)
-            finally:
-                if sampler is not None:
-                    sampler.stop()
+    with closing(open_db(state_dir, create=False)) as conn:
+        listen_socket: socket.socket | None = None
+        socket_path: Path | None = None
+        try:
+            listen_socket, socket_path = _create_listen_socket(session_id)
+            sup_store = SessionStore(conn)
+            event_store = EventStore(conn)
+            control_state = control.ControlState()
+            control.install_handlers(control_state)
+            generation = 0
+            pty_child, sampler, sampler_thread = _spawn_generation(
+                argv, cwd, state_dir, session_id, generation=generation
+            )
+            sup_store.update(
+                session_id,
+                state=SessionState.running,
+                supervisor_pid=os.getpid(),
+                socket_path=socket_path,
+            )
+            while True:
                 if sampler_thread is not None:
-                    sampler_thread.join()
-            if control_state.restart_pending is None:
-                _finalize_exit(pty_child, session_id, sup_store, start_mono)
-                _drain_descendants(pty_child)
-                break
-            _finalize_exit(pty_child, session_id, sup_store, start_mono, in_restart=True)
-            sup_store.update(session_id, state=SessionState.restarting)
-            new_generation = generation + 1
-            try:
-                pty_child, sampler, sampler_thread = _respawn_with_backoff(
-                    argv, cwd, state_dir, session_id, new_generation
-                )
-            except (OSError, PtyProcessError) as exc:
-                control.advance_restart_on_spawn_failure(
+                    sampler_thread.start()
+                start_mono = time.monotonic()
+                try:
+                    _supervise_loop(
+                        pty_child,
+                        listen_socket=listen_socket,
+                        session_id=session_id,
+                        event_store=event_store,
+                        generation=generation,
+                        store=sup_store,
+                        control_state=control_state,
+                        stop_timeout_seconds=stop_timeout_seconds,
+                    )
+                    control.emit_terminal_events(control_state, event_store, session_id, generation)
+                finally:
+                    if sampler is not None:
+                        sampler.stop()
+                    if sampler_thread is not None:
+                        sampler_thread.join()
+                if control_state.restart_pending is None:
+                    _finalize_exit(pty_child, session_id, sup_store, start_mono)
+                    _drain_descendants(pty_child)
+                    break
+                _finalize_exit(pty_child, session_id, sup_store, start_mono, in_restart=True)
+                sup_store.update(session_id, state=SessionState.restarting)
+                new_generation = generation + 1
+                try:
+                    pty_child, sampler, sampler_thread = _respawn_with_backoff(
+                        argv, cwd, state_dir, session_id, new_generation
+                    )
+                except (OSError, PtyProcessError) as exc:
+                    control.advance_restart_on_spawn_failure(
+                        control_state,
+                        sup_store,
+                        event_store,
+                        session_id,
+                        generation,
+                        "runtime_error",
+                        str(exc),
+                    )
+                    break
+                current = sup_store.get(session_id)
+                if current is None:
+                    msg = f"session row disappeared mid-restart: {session_id}"
+                    raise RuntimeError(msg)
+                control.advance_restart_on_spawn_success(
                     control_state,
                     sup_store,
                     event_store,
                     session_id,
-                    generation,
-                    "runtime_error",
-                    str(exc),
+                    new_generation,
+                    current.control_epoch + 1,
                 )
-                break
-            current = sup_store.get(session_id)
-            if current is None:
-                msg = f"session row disappeared mid-restart: {session_id}"
-                raise RuntimeError(msg)
-            control.advance_restart_on_spawn_success(
-                control_state,
-                sup_store,
-                event_store,
-                session_id,
-                new_generation,
-                current.control_epoch + 1,
-            )
-            generation = new_generation
-        sup_store.update(session_id, supervisor_pid=None, socket_path=None)
-    finally:
-        _cleanup_listen_socket(listen_socket, socket_path)
-        conn.close()
+                generation = new_generation
+            sup_store.update(session_id, supervisor_pid=None, socket_path=None)
+        finally:
+            _cleanup_listen_socket(listen_socket, socket_path)
