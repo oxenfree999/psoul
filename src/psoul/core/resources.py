@@ -112,7 +112,7 @@ class ResourceSampler:
         background thread.  Exits cleanly on ``stop()`` or when the
         process disappears.
         """
-        with closing(open_db(self._state_dir)) as conn, GpuReader() as gpu:
+        with closing(open_db(self._state_dir, create=False)) as conn, GpuReader() as gpu:
             event_store = EventStore(conn)
             while not self._stop_event.is_set():
                 try:

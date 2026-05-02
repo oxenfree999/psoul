@@ -20,11 +20,16 @@ requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.
 
 
 def _write_config(tmp_path: Path) -> tuple[Path, Path]:
-    """Create a config file pointing at a tmp_path-backed state dir."""
+    """Create a config file pointing at a tmp_path-backed state dir.
+
+    The config opts in to recording by default and pre-creates the DB so
+    tests that exercise read-side commands skip the no-DB short-circuit.
+    """
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     config = tmp_path / "psoul.toml"
-    config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n")
+    config.write_text(f"[paths]\nstate_dir = '{state_dir}'\n[session]\nrecord = true\n")
+    open_db(state_dir).close()
     return config, state_dir
 
 

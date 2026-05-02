@@ -406,7 +406,7 @@ def test_run_config_attached_beats_piped_stdin(tmp_path: Path, monkeypatch: pyte
     """
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     config = tmp_path / "psoul.toml"
-    config.write_text('[launch]\nmode = "attached"\n')
+    config.write_text('[launch]\nmode = "attached"\n[session]\nrecord = true\n')
     script = tmp_path / "noop.py"
     script.write_text("pass")
     captured: dict[str, LaunchMode] = {}
@@ -427,7 +427,7 @@ def test_duplicate_session_id_rejected(tmp_path: Path, monkeypatch: pytest.Monke
     _store_session(tmp_path, "dup-test")
     script = tmp_path / "noop.py"
     script.write_text("pass")
-    result = runner.invoke(cli, ["run", "--name", "dup-test", str(script)])
+    result = runner.invoke(cli, ["run", "--record", "--name", "dup-test", str(script)])
     assert result.exit_code == 1
     assert "session ID already exists: dup-test" in result.output
 
@@ -469,6 +469,7 @@ def test_status_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_status_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    open_db(tmp_path).close()
     result = runner.invoke(cli, ["status", "nonexistent"])
     assert result.exit_code == 1
     assert "session not found: nonexistent" in result.output
@@ -518,11 +519,13 @@ def test_launch_to_query_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_bare_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul script.py`` is equivalent to ``psoul run script.py``."""
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    config = tmp_path / "psoul.toml"
+    config.write_text("[session]\nrecord = true\n")
     script = tmp_path / "hello.py"
     script.write_text("pass")
-    result = runner.invoke(cli, [str(script)])
+    result = runner.invoke(cli, ["--config", str(config), str(script)])
     assert result.exit_code == 0
-    records = json.loads(runner.invoke(cli, ["ps", "--json"]).output)
+    records = json.loads(runner.invoke(cli, ["--config", str(config), "ps", "--json"]).output)
     assert len(records) == 1
     assert records[0]["target"] == str(script)
     assert records[0]["state"] == "exited"
@@ -530,13 +533,15 @@ def test_bare_file_routes_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_bare_file_with_global_verbose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``psoul -v script.py`` — global options parsed before disambiguation."""
+    """``psoul -v script.py``: global options parsed before disambiguation."""
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    config = tmp_path / "psoul.toml"
+    config.write_text("[session]\nrecord = true\n")
     script = tmp_path / "hello.py"
     script.write_text("pass")
-    result = runner.invoke(cli, ["-v", str(script)])
+    result = runner.invoke(cli, ["--config", str(config), "-v", str(script)])
     assert result.exit_code == 0
-    records = json.loads(runner.invoke(cli, ["ps", "--json"]).output)
+    records = json.loads(runner.invoke(cli, ["--config", str(config), "ps", "--json"]).output)
     assert len(records) == 1
 
 
@@ -551,13 +556,17 @@ def test_bare_nonexistent_file_errors_unknown_command(tmp_path: Path) -> None:
 def test_bare_file_passes_extra_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``psoul script.py extra --child-flag`` passes trailing tokens to run."""
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    config = tmp_path / "psoul.toml"
+    config.write_text("[session]\nrecord = true\n")
     script = tmp_path / "echo.py"
     script.write_text("pass")
-    result = runner.invoke(cli, [str(script), "extra", "--child-flag"])
+    result = runner.invoke(cli, ["--config", str(config), str(script), "extra", "--child-flag"])
     assert result.exit_code == 0
-    records = json.loads(runner.invoke(cli, ["ps", "--json"]).output)
+    records = json.loads(runner.invoke(cli, ["--config", str(config), "ps", "--json"]).output)
     assert len(records) == 1
-    detail = json.loads(runner.invoke(cli, ["status", records[0]["session_id"], "--json"]).output)
+    detail = json.loads(
+        runner.invoke(cli, ["--config", str(config), "status", records[0]["session_id"], "--json"]).output
+    )
     assert detail["target_args"] == ["extra", "--child-flag"]
 
 

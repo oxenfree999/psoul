@@ -117,6 +117,7 @@ def test_restart_cli_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_restart_unknown_session_selector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A selector that matches no session surfaces a session-not-found error."""
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    open_db(tmp_path).close()
     result = runner.invoke(cli, ["restart", "does-not-exist"])
     assert result.exit_code == ExitCode.USAGE
     assert "session not found" in result.output

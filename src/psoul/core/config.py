@@ -172,6 +172,7 @@ class SessionConfig:
     """[session] section.
 
     tags (dict | None): default key-value tags applied to all sessions. Default: None.
+    record (bool): opt in to persistent recording of sessions. Default: False.
     """
 
     tags: dict[str, str] | None = field(
@@ -180,6 +181,10 @@ class SessionConfig:
             "description": "default key-value tags applied to all sessions",
             "example": {"env": "dev", "team": "platform"},
         },
+    )
+    record: bool = field(
+        default=False,
+        metadata={"description": "opt in to persistent recording of sessions"},
     )
 
 

@@ -43,6 +43,38 @@ def test_open_db_creates_file(tmp_path: Path) -> None:
     assert (tmp_path / DB_NAME).exists()
 
 
+def test_resolve_state_dir_create_false_skips_mkdir(tmp_path: Path) -> None:
+    """`resolve_state_dir(create=False)` returns the path without touching the filesystem."""
+    target = tmp_path / "does-not-exist"
+    result = resolve_state_dir(target, create=False)
+    assert result == target
+    assert not target.exists()
+
+
+def test_open_db_create_false_raises_when_db_missing(tmp_path: Path) -> None:
+    """`open_db(create=False)` raises FileNotFoundError when the DB file is absent."""
+    with pytest.raises(FileNotFoundError):
+        open_db(tmp_path, create=False)
+
+
+def test_open_db_create_false_raises_when_schema_missing(tmp_path: Path) -> None:
+    """`open_db(create=False)` raises FileNotFoundError when the file exists but schema is empty."""
+    (tmp_path / DB_NAME).touch()
+    with pytest.raises(FileNotFoundError):
+        open_db(tmp_path, create=False)
+
+
+def test_open_db_create_false_succeeds_when_initialized(tmp_path: Path) -> None:
+    """`open_db(create=False)` opens a previously-initialized DB."""
+    open_db(tmp_path).close()
+    conn = open_db(tmp_path, create=False)
+    try:
+        cursor = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
+        assert cursor.fetchone()[0] == str(SCHEMA_VERSION)
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize(
     ("pragma", "expected"),
     [

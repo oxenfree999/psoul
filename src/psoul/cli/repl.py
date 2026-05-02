@@ -19,7 +19,7 @@ from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.enums import DEFAULT_BUFFER, EditingMode
 from prompt_toolkit.filters import Condition, emacs_insert_mode, has_focus, vi_insert_mode
-from prompt_toolkit.history import History, ThreadedHistory
+from prompt_toolkit.history import History, InMemoryHistory, ThreadedHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.validation import ValidationError, Validator
@@ -337,3 +337,41 @@ def run_repl(session_id: str, conn: sqlite3.Connection, db_path: Path, tags: dic
         finally:
             store.update(session_id, state=SessionState.stopping)
             store.update(session_id, state=final_state, supervisor_pid=None)
+
+
+def run_repl_ephemeral() -> None:
+    """Run an interactive REPL session without persistence.
+
+    Used when the user did not opt in to recording. No DB, no session row,
+    no provenance gather. History is in-memory only.
+    """
+    engine = ReplEngine()
+    history = InMemoryHistory()
+    console = Console()
+    completer = PythonCompleter(engine.namespace)
+    prompt = PromptSession(
+        history=ThreadedHistory(history),
+        lexer=PygmentsLexer(PythonLexer),
+        completer=completer,
+        validator=PythonValidator(engine),
+        key_bindings=_repl_key_bindings(engine, completer),
+        multiline=True,
+        prompt_continuation="... ",
+        editing_mode=EditingMode.EMACS,
+    )
+    while True:
+        try:
+            text = prompt.prompt(">>> ")
+        except KeyboardInterrupt:
+            continue
+        except EOFError:
+            break
+        result = engine.execute(text)
+        if result.quit:
+            break
+        if result.output:
+            console.print(result.output)
+        if result.exception is not None:
+            traceback.print_exception(result.exception, file=sys.stderr)
+        elif result.has_value and result.value is not None:
+            console.print(repr(result.value))

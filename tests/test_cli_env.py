@@ -317,8 +317,8 @@ def test_cli_session_selector(
     expected_exit_code: int,
     expected_substring: str,
 ) -> None:
-    if seed_session_id is not None:
-        with closing(open_db(state_dir)) as conn:
+    with closing(open_db(state_dir)) as conn:
+        if seed_session_id is not None:
             SessionStore(conn).create(_make_session(session_id=seed_session_id))
     result = runner.invoke(cli, ["env", selector])
     assert result.exit_code == expected_exit_code

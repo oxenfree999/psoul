@@ -68,12 +68,12 @@ def test_help_shows_flags() -> None:
 
 
 @pytest.mark.parametrize(
-    ("invocation", "needs_script"),
+    ("invocation", "needs_script", "needs_record"),
     [
-        pytest.param([], False, id="bare-psoul"),
-        pytest.param(["run"], True, id="run"),
-        pytest.param(["ps"], False, id="ps"),
-        pytest.param(["status", "fake-id"], False, id="status"),
+        pytest.param([], False, True, id="bare-psoul"),
+        pytest.param(["run", "--record"], True, False, id="run"),
+        pytest.param(["ps"], False, False, id="ps"),
+        pytest.param(["status", "fake-id"], False, False, id="status"),
     ],
 )
 def test_open_db_lock_translates_to_clean_cli_error(
@@ -81,15 +81,20 @@ def test_open_db_lock_translates_to_clean_cli_error(
     monkeypatch: pytest.MonkeyPatch,
     invocation: list[str],
     needs_script: bool,
+    needs_record: bool,
 ) -> None:
     monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
     args = list(invocation)
+    if needs_record:
+        config = tmp_path / "psoul.toml"
+        config.write_text("[session]\nrecord = true\n")
+        args = ["--config", str(config), *args]
     if needs_script:
         script = tmp_path / "noop.py"
         script.write_text("pass")
         args.append(str(script))
 
-    def raise_locked(_state_dir: Path) -> sqlite3.Connection:
+    def raise_locked(_state_dir: Path, *, create: bool = True) -> sqlite3.Connection:
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr("psoul.cli.main.open_db", raise_locked)

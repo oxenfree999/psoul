@@ -12,21 +12,27 @@ DB_NAME = "psoul.db"
 _MIGRATIONS: dict[int, collections.abc.Callable[[sqlite3.Connection], None]] = {}
 
 
-def resolve_state_dir(config_state_dir: Path | None = None) -> Path:
-    """Return the state directory, creating it if needed.
+def resolve_state_dir(config_state_dir: Path | None = None, *, create: bool = True) -> Path:
+    """Return the state directory, optionally creating it.
 
     Uses the config override when set, falling back to the platform default.
 
     Args:
         config_state_dir (Path | None): Explicit directory from config, or
             ``None`` to use the platform default.
+        create (bool): When ``True`` (default), ensures the directory exists
+            via ``mkdir(parents=True, exist_ok=True)``. When ``False``,
+            returns the resolved path without touching the filesystem.
+            Callers that need to detect a missing state dir use this form.
 
     Returns:
-        Path: Resolved state directory (guaranteed to exist).
+        Path: Resolved state directory (guaranteed to exist when ``create`` is
+            ``True``).
 
     """
     state_dir = config_state_dir if config_state_dir is not None else default_state_dir()
-    state_dir.mkdir(parents=True, exist_ok=True)
+    if create:
+        state_dir.mkdir(parents=True, exist_ok=True)
     return state_dir
 
 
@@ -254,31 +260,46 @@ def _schema_exists(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def open_db(state_dir: Path) -> sqlite3.Connection:
+def open_db(state_dir: Path, *, create: bool = True) -> sqlite3.Connection:
     """Open or create the psoul database.
 
     Configures the connection for safe concurrent access, creates the
-    schema on first use, and runs pending migrations on an existing
-    database.  The caller owns the returned connection and must close it.
+    schema on first use (when ``create`` is ``True``), and runs pending
+    migrations on an existing database.  The caller owns the returned
+    connection and must close it.
 
     Args:
         state_dir (Path): Directory containing (or that will contain) ``psoul.db``.
+        create (bool): When ``True`` (default), creates the schema if the
+            database does not yet exist. When ``False``, raises
+            ``FileNotFoundError`` if the database file or schema is missing.
+            Callers that gate on "has anything been recorded" use this form
+            to detect the empty-state case.
 
     Returns:
         sqlite3.Connection: Ready-to-use connection with schema in place.
 
     Raises:
+        FileNotFoundError: ``create`` is ``False`` and the database file or
+            schema does not exist.
         RuntimeError: Database schema is newer than this psoul version.
 
     """
-    conn = sqlite3.connect(state_dir / DB_NAME, timeout=5.0)
+    db_path = state_dir / DB_NAME
+    if not create and not db_path.exists():
+        raise FileNotFoundError(db_path)
+    conn = sqlite3.connect(db_path, timeout=5.0)
     try:
         _apply_pragmas(conn)
-        if not _schema_exists(conn):
-            _create_schema(conn)
-        else:
+        schema_present = _schema_exists(conn)
+        if schema_present:
             _check_version(conn)
+        elif create:
+            _create_schema(conn)
     except Exception:
         conn.close()
         raise
+    if not schema_present and not create:
+        conn.close()
+        raise FileNotFoundError(db_path)
     return conn

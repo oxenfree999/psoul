@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import tomllib
@@ -24,7 +25,7 @@ from psoul.cli.env import format_text as format_env_text
 from psoul.cli.env import get_current_env, get_session_env
 from psoul.cli.logging import configure_logging, resolve_log_level
 from psoul.cli.prune import PruneState, run_prune
-from psoul.cli.repl import run_repl
+from psoul.cli.repl import run_repl, run_repl_ephemeral
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
 from psoul.core.artifacts import ArtifactStore
 from psoul.core.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
@@ -94,6 +95,23 @@ def _open_db_or_exit(state_dir: Path) -> sqlite3.Connection:
     except sqlite3.OperationalError as exc:
         print(f"Error: database is busy or locked: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from exc
+
+
+_NO_RECORDED_SESSIONS_MSG = "no recorded sessions, pass --record to enable persistence"
+
+
+def _open_db_or_empty_state(cfg: PsoulConfig, *, missing_exit_code: ExitCode) -> tuple[Path, sqlite3.Connection]:
+    """Open the DB. Exit with *missing_exit_code* and the empty-state message if no DB exists."""
+    state_dir = resolve_state_dir(cfg.paths.state_dir, create=False)
+    try:
+        conn = open_db(state_dir, create=False)
+    except FileNotFoundError:
+        print(_NO_RECORDED_SESSIONS_MSG, file=sys.stderr)
+        raise typer.Exit(missing_exit_code) from None
+    except sqlite3.OperationalError as exc:
+        print(f"Error: database is busy or locked: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.ERROR) from exc
+    return state_dir, conn
 
 
 def _version_callback(value: bool) -> None:
@@ -195,7 +213,12 @@ def _main(
         _launch_repl(ctx)
 
 
-def _launch_repl(ctx: typer.Context, name: str | None = None, tag: list[str] | None = None) -> None:
+def _launch_repl(
+    ctx: typer.Context,
+    name: str | None = None,
+    tag: list[str] | None = None,
+    record: bool = False,
+) -> None:
     """Shared REPL launch logic for bare `psoul` and `psoul repl`."""
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
@@ -204,6 +227,10 @@ def _launch_repl(ctx: typer.Context, name: str | None = None, tag: list[str] | N
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.USAGE) from exc
+    resolved_tags = parse_tags(tag, defaults=cfg.session.tags)
+    if not (record or cfg.session.record):
+        run_repl_ephemeral()
+        return
     state_dir = resolve_state_dir(cfg.paths.state_dir)
     conn = _open_db_or_exit(state_dir)
     try:
@@ -211,7 +238,7 @@ def _launch_repl(ctx: typer.Context, name: str | None = None, tag: list[str] | N
         if SessionStore(conn).get(session_id) is not None:
             print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
             raise typer.Exit(ExitCode.ERROR)
-        run_repl(session_id, conn, db_path=state_dir / DB_NAME, tags=parse_tags(tag, defaults=cfg.session.tags))
+        run_repl(session_id, conn, db_path=state_dir / DB_NAME, tags=resolved_tags)
     except sqlite3.IntegrityError:
         print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
@@ -224,9 +251,12 @@ def repl(
     ctx: typer.Context,
     name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
     tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
+    record: Annotated[
+        bool, typer.Option("--record", "-r", help="Save this session so `psoul ps` and other commands can find it.")
+    ] = False,
 ) -> None:
     """Start an interactive REPL session."""
-    _launch_repl(ctx, name=name, tag=tag)
+    _launch_repl(ctx, name=name, tag=tag, record=record)
 
 
 @cli.command()
@@ -253,9 +283,9 @@ def env(
     else:
         gs: GlobalState = ctx.obj
         cfg = _load_resolved_config(gs.config_override)
-        state_dir = resolve_state_dir(cfg.paths.state_dir)
+        _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
         try:
-            with closing(_open_db_or_exit(state_dir)) as conn:
+            with closing(conn):
                 recover_sessions(conn)
                 session = _resolve_session_selector(SessionStore(conn), session_id)
         except ValueError as exc:
@@ -329,6 +359,10 @@ def run(
     name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
     headless: Annotated[bool, typer.Option("--headless", help="Launch in background.")] = False,
     tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
+    record: Annotated[
+        bool,
+        typer.Option("--record", "-r", help="Save this session so `psoul ps` and other commands can find it."),
+    ] = False,
 ) -> None:
     """Launch a Python target as a managed session."""
     state: GlobalState = ctx.obj
@@ -342,6 +376,7 @@ def run(
             extra_args=extra_args,
             name=name,
             headless=headless,
+            record=record or cfg.session.record,
             tags=parse_tags(tag, defaults=cfg.session.tags),
             python_path=cfg.python.python_path or Path(sys.executable),
             default_mode=LaunchMode(cfg.launch.mode),
@@ -349,6 +384,9 @@ def run(
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.USAGE) from exc
+    if not request.record_requested:
+        proc = subprocess.run(request.target.as_cmd(), cwd=request.cwd, check=False)  # noqa: S603
+        raise typer.Exit(proc.returncode)
     state_dir = resolve_state_dir(cfg.paths.state_dir)
     conn = _open_db_or_exit(state_dir)
     try:
@@ -389,7 +427,8 @@ def _deliver_control_signal(ctx: typer.Context, selector: str, *, signame: str, 
     sig = getattr(signal, signame)
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
-    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.USAGE)
+    with closing(conn):
         recover_sessions(conn)
         try:
             session = _resolve_session_selector(SessionStore(conn), selector)
@@ -484,7 +523,8 @@ def _deliver_child_pgroup_signal(
     sig = getattr(signal, signame)
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
-    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.USAGE)
+    with closing(conn):
         recover_sessions(conn)
         try:
             session = _resolve_session_selector(SessionStore(conn), selector)
@@ -567,7 +607,8 @@ def _deliver_named_signal_to_pgroup(ctx: typer.Context, selector: str, raw_signa
     sig = _resolve_signal_name(raw_signal)
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
-    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.USAGE)
+    with closing(conn):
         recover_sessions(conn)
         try:
             session = _resolve_session_selector(SessionStore(conn), selector)
@@ -620,12 +661,14 @@ def attach(
     if sys.platform == "win32":
         print("Error: attach is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
         raise typer.Exit(ExitCode.USAGE)
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        print("Error: psoul attach requires a TTY", file=sys.stderr)
-        raise typer.Exit(ExitCode.USAGE)
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    with closing(_open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))) as conn:
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.USAGE)
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        conn.close()
+        print("Error: psoul attach requires a TTY", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE)
+    with closing(conn):
         recover_sessions(conn)
         store = SessionStore(conn)
         try:
@@ -671,12 +714,10 @@ def ps(
     """List sessions."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
-    try:
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
+    with closing(conn):
         recover_sessions(conn)
         sessions = SessionStore(conn).list(state=state, tags=parse_tags(tag))
-    finally:
-        conn.close()
     if json_flag:
         print(json.dumps([dataclasses.asdict(s) for s in sessions], default=str))
         return
@@ -693,15 +734,14 @@ def status(
     """Show session detail."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
-    try:
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
+    with closing(conn):
         recover_sessions(conn)
-        session = _resolve_session_selector(SessionStore(conn), session_id)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise typer.Exit(ExitCode.ERROR) from None
-    finally:
-        conn.close()
+        try:
+            session = _resolve_session_selector(SessionStore(conn), session_id)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise typer.Exit(ExitCode.ERROR) from None
     if json_flag:
         print(json.dumps(dataclasses.asdict(session), default=str, indent=2))
         return
@@ -724,9 +764,9 @@ def logs(
         raise typer.BadParameter("--stdout and --stderr cannot be used together.")
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    state_dir = resolve_state_dir(cfg.paths.state_dir)
+    state_dir, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
     try:
-        with closing(_open_db_or_exit(state_dir)) as conn:
+        with closing(conn):
             recover_sessions(conn)
             session = _resolve_session_selector(SessionStore(conn), session_id)
             events = EventStore(conn).list(session.session_id, generation=generation)
@@ -812,9 +852,9 @@ def events(
     """Print the event log for a session."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    state_dir = resolve_state_dir(cfg.paths.state_dir)
+    state_dir, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
     try:
-        with closing(_open_db_or_exit(state_dir)) as conn:
+        with closing(conn):
             recover_sessions(conn)
             session = _resolve_session_selector(SessionStore(conn), session_id)
             rows = EventStore(conn).list(session.session_id)
@@ -852,26 +892,25 @@ def stats(
     """Show current resource usage (CPU, memory, disk, GPU if available)."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    conn = _open_db_or_exit(resolve_state_dir(cfg.paths.state_dir))
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
     try:
-        recover_sessions(conn)
-        session = _resolve_session_selector(SessionStore(conn), session_id)
-        cursor = conn.execute(
-            "SELECT generation, timestamp, cpu_percent, memory_rss_mb, memory_vms_mb,"
-            "       disk_read_mb, disk_write_mb,"
-            "       gpu_utilization_pct, gpu_memory_used_mb, gpu_memory_total_mb,"
-            "       gpu_temperature_c, gpu_power_watts"
-            " FROM resource_samples WHERE session_id = ?"
-            " ORDER BY generation DESC, timestamp DESC LIMIT 1",
-            (session.session_id,),
-        )
-        row = cursor.fetchone()
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        with closing(conn):
+            recover_sessions(conn)
+            session = _resolve_session_selector(SessionStore(conn), session_id)
+            cursor = conn.execute(
+                "SELECT generation, timestamp, cpu_percent, memory_rss_mb, memory_vms_mb,"
+                "       disk_read_mb, disk_write_mb,"
+                "       gpu_utilization_pct, gpu_memory_used_mb, gpu_memory_total_mb,"
+                "       gpu_temperature_c, gpu_power_watts"
+                " FROM resource_samples WHERE session_id = ?"
+                " ORDER BY generation DESC, timestamp DESC LIMIT 1",
+                (session.session_id,),
+            )
+            row = cursor.fetchone()
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
-    finally:
-        conn.close()
     if row is None:
         print("Error: no resource samples found.", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR)
@@ -892,9 +931,9 @@ def artifacts(
     """List files produced by a session (plots, checkpoints, exports)."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    state_dir = resolve_state_dir(cfg.paths.state_dir)
+    _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
     try:
-        with closing(_open_db_or_exit(state_dir)) as conn:
+        with closing(conn):
             recover_sessions(conn)
             session = _resolve_session_selector(SessionStore(conn), session_id)
             rows = ArtifactStore(conn).list(session.session_id)
@@ -942,8 +981,8 @@ def prune(
     """Remove completed sessions and their data by age, state, or tags."""
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
-    state_dir = resolve_state_dir(cfg.paths.state_dir)
-    with closing(_open_db_or_exit(state_dir)) as conn:
+    state_dir, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.SUCCESS)
+    with closing(conn):
         recover_sessions(conn)
         run_prune(
             SessionStore(conn),
