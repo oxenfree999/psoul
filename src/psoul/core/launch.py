@@ -95,6 +95,7 @@ class LaunchRequest:
     launch_mode: LaunchMode
     target: LaunchTarget
     cwd: Path
+    record_requested: bool = False
     tags: Mapping[str, str] | None = None
 
 
@@ -108,11 +109,14 @@ def build_launch_request(
     tags: dict[str, str] | None,
     python_path: Path,
     default_mode: LaunchMode,
+    record: bool = False,
 ) -> LaunchRequest:
     """Assemble a frozen LaunchRequest from CLI inputs.
 
     The launch mode is headless when ``--headless`` is set. Otherwise,
-    *default_mode* applies.
+    *default_mode* applies. Recording is requested when *record* is True
+    or the resolved launch mode is headless (since headless mode requires
+    persistence to support async query).
 
     Args:
         target (str | None): Script path.
@@ -120,6 +124,9 @@ def build_launch_request(
         extra_args (Sequence[str]): Additional arguments for the target.
         name (str | None): Explicit session ID, or ``None`` to auto-generate.
         headless (bool): Force headless launch mode.
+        record (bool): User-driven persistence flag (CLI ``--record`` or
+            ``[session] record = true`` in config). Headless launches
+            imply recording regardless of this value.
         tags (dict[str, str] | None): Session tags from ``--tag`` flags.
         python_path (Path): Python interpreter that runs the target.
         default_mode (LaunchMode): Mode used when ``--headless`` is unset.
@@ -129,11 +136,14 @@ def build_launch_request(
 
     """
     launch_target = parse_launch_target(target=target, module=module, extra_args=extra_args, python_path=python_path)
+    launch_mode = LaunchMode.headless if headless else default_mode
+    record_requested = record or launch_mode == LaunchMode.headless
     return LaunchRequest(
         session_id=resolve_session_id(name),
-        launch_mode=LaunchMode.headless if headless else default_mode,
+        launch_mode=launch_mode,
         target=launch_target,
         cwd=Path.cwd(),
+        record_requested=record_requested,
         tags=MappingProxyType(dict(tags)) if tags is not None else None,
     )
 
