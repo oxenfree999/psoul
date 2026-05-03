@@ -7,8 +7,11 @@ from datetime import UTC, datetime
 
 EVENT_RUNTIME_STDOUT = "runtime.stdout"
 EVENT_RUNTIME_STDERR = "runtime.stderr"
+EVENT_RUNTIME_STATUS = "runtime.status"
 EVENT_SESSION_CONTROLLER_ACQUIRED = "session.controller_acquired"
 EVENT_SESSION_CONTROLLER_RELEASED = "session.controller_released"
+EVENT_HELPER_TIMEOUT = "helper.timeout"
+EVENT_HELPER_CRASHED = "helper.crashed"
 
 
 class EventStore:
