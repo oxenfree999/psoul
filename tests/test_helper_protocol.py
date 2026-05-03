@@ -1,14 +1,15 @@
-"""Tests for the supervisor-side HelperTransport."""
+"""Tests for the supervisor-side HelperTransport and HelperLifecycle."""
 
 import json
 import socket
 import struct
 import threading
 from collections.abc import Iterator
+from unittest.mock import MagicMock
 
 import pytest
 
-from psoul.core.helper import HelperTransport
+from psoul.core.helper import HelperLifecycle, HelperTransport
 from psoul.helper._psoul_helper import UnixHelperPipeAdapter
 
 _AdapterPair = tuple[UnixHelperPipeAdapter, UnixHelperPipeAdapter]
@@ -110,6 +111,51 @@ def test_close_is_idempotent(adapter_pair: _AdapterPair) -> None:
     transport = HelperTransport(transport_side)
     transport.close()
     transport.close()
+
+
+_OK_RESPONSE = {"id": "x", "type": "response", "status": "ok", "result": {"commands": ["ping"]}}
+_NON_DICT_RESPONSE = {"id": "x", "type": "response", "status": "ok", "result": "not a dict"}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"return_value": _OK_RESPONSE}, {"commands": ["ping"]}),
+        ({"return_value": _NON_DICT_RESPONSE}, None),
+        ({"side_effect": TimeoutError}, None),
+        ({"side_effect": EOFError}, None),
+        ({"side_effect": ValueError("bad id")}, None),
+        ({"side_effect": json.JSONDecodeError("oops", "doc", 0)}, None),
+        ({"side_effect": BrokenPipeError("peer closed")}, None),
+    ],
+    ids=["ok", "non_dict", "timeout", "eof", "value_error", "json_error", "broken_pipe"],
+)
+def test_lifecycle_request_capabilities(kwargs: dict, expected: dict | None) -> None:
+    transport = MagicMock(spec=HelperTransport)
+    for k, v in kwargs.items():
+        setattr(transport.request, k, v)
+    assert HelperLifecycle(transport).request_capabilities(timeout_ms=5000) == expected
+    transport.request.assert_called_once_with("capabilities", timeout_ms=5000)
+
+
+@pytest.mark.parametrize(
+    ("child_alive", "expected_calls"),
+    [
+        (False, []),
+        (True, [(("helper.crashed", {}),), (("runtime.status", {"helper_lost": True}),)]),
+    ],
+    ids=["child_exited", "child_alive"],
+)
+def test_lifecycle_emit_for_eof(child_alive: bool, expected_calls: list) -> None:
+    writer = MagicMock()
+    HelperLifecycle(MagicMock(spec=HelperTransport)).emit_for_eof(child_alive=child_alive, event_writer=writer)
+    assert writer.call_args_list == expected_calls
+
+
+def test_lifecycle_close_delegates_to_transport() -> None:
+    transport = MagicMock(spec=HelperTransport)
+    HelperLifecycle(transport).close()
+    transport.close.assert_called_once()
 
 
 def test_concurrent_requests_serialize(adapter_pair: _AdapterPair) -> None:

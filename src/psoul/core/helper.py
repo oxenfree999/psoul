@@ -94,3 +94,53 @@ class HelperTransport:
         payload_timeout = max(0.0, deadline - time.monotonic())
         payload = self._adapter.recv(length, timeout=payload_timeout)
         return json.loads(payload)
+
+
+class HelperLifecycle:
+    """Owns the supervisor-side helper transport plus crash-vs-exit decision logic.
+
+    Wraps a :class:`HelperTransport` and provides the readiness-exchange convenience method
+    plus the EOF-disambiguation logic both spawn paths use to emit ``helper.crashed`` /
+    ``runtime.status(helper_lost=true)`` events on the same triggers.
+    """
+
+    def __init__(self, transport: HelperTransport) -> None:
+        """Wrap a HelperTransport."""
+        self._transport = transport
+
+    def request_capabilities(self, timeout_ms: int) -> dict | None:
+        """Send a ``capabilities`` request and return the result dict, or ``None`` on failure.
+
+        Used at supervisor startup as the readiness signal. Returns ``None`` for any helper-side failure
+        (timeout, EOF, malformed response) so the integrator can fall back to basic mode without catching
+        multiple exception types.
+        """
+        try:
+            response = self._transport.request("capabilities", timeout_ms=timeout_ms)
+        except (TimeoutError, EOFError, ValueError, json.JSONDecodeError, OSError):
+            return None
+        result = response.get("result")
+        return result if isinstance(result, dict) else None
+
+    def emit_for_eof(self, *, child_alive: bool, event_writer: "_EventWriter") -> None:
+        """Emit lifecycle events when the helper adapter sees EOF.
+
+        ``event_writer`` is a callable taking ``(event_type, payload_dict)``. When the child process is still
+        alive but the helper closed its end of the pipe, the helper has crashed mid-run: emit
+        ``helper.crashed`` and ``runtime.status`` with ``helper_lost: true``. When the child has exited, the
+        EOF is the natural consequence of process teardown and the call returns silently.
+        """
+        if not child_alive:
+            return
+        event_writer("helper.crashed", {})
+        event_writer("runtime.status", {"helper_lost": True})
+
+    def close(self) -> None:
+        """Close the underlying transport. Idempotent."""
+        self._transport.close()
+
+
+class _EventWriter(Protocol):
+    """Structural type for the event-write callback used by :meth:`HelperLifecycle.emit_for_eof`."""
+
+    def __call__(self, event_type: str, payload: dict) -> None: ...
