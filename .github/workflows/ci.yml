@@ -34,7 +34,7 @@ jobs:
           enable-cache: true
       - run: uv python install
       - run: uv sync --group lint
-      - run: uv run ty check
+      - run: uv run ty check src tests
 
   test:
     strategy:
