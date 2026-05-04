@@ -397,20 +397,34 @@ def run(
             raise typer.Exit(ExitCode.ERROR)
         if request.launch_mode == LaunchMode.headless:
             stop_timeout = parse_duration(cfg.process.stop_timeout).total_seconds()
-            session, supervisor_pid = launch_headless(request, store, state_dir, stop_timeout_seconds=stop_timeout)
+            session, supervisor_pid = launch_headless(
+                request=request,
+                store=store,
+                state_dir=state_dir,
+                stop_timeout_seconds=stop_timeout,
+            )
             print(
                 json.dumps(
                     {"session_id": session.session_id, "state": session.state.value, "supervisor_pid": supervisor_pid}
                 )
             )
         else:
-            launch_attached(request, store)
+            helper_connect_timeout = parse_duration(cfg.helper.connect_timeout).total_seconds()
+            launch_attached(
+                request=request,
+                store=store,
+                state_dir=state_dir,
+                helper_connect_timeout_seconds=helper_connect_timeout,
+            )
     except sqlite3.IntegrityError:
         print(f"Error: session ID already exists: {request.session_id}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
     except NotImplementedError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(ExitCode.ERROR) from None
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(ExitCode.USAGE) from None
     finally:
         conn.close()
 
@@ -742,10 +756,12 @@ def status(
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             raise typer.Exit(ExitCode.ERROR) from None
+    fields = dataclasses.asdict(session)
+    fields["helper"] = session.helper_pid is not None
     if json_flag:
-        print(json.dumps(dataclasses.asdict(session), default=str, indent=2))
+        print(json.dumps(fields, default=str, indent=2))
         return
-    for key, value in dataclasses.asdict(session).items():
+    for key, value in fields.items():
         if value is not None:
             print(f"{key}: {value}")
 

@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -261,12 +262,16 @@ def test_headless_child_exits_one_when_supervisor_body_raises(
     assert os.WEXITSTATUS(status) == 1
 
 
-def test_attached_launch_clears_supervisor_pid_on_exit(store: SessionStore) -> None:
-    final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached), store)
+def test_attached_launch_clears_supervisor_pid_on_exit(store: SessionStore, tmp_path: Path) -> None:
+    final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached), store, tmp_path)
     assert final.supervisor_pid is None
 
 
-def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_attached_launch_populates_provenance(
+    store: SessionStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_provenance: SessionProvenance = {
         "git_sha": "b" * 40,
         "git_dirty": True,
@@ -286,7 +291,7 @@ def test_attached_launch_populates_provenance(store: SessionStore, monkeypatch: 
 
     monkeypatch.setattr("psoul.core.launch.gather", fake_gather)
     req = _script_request("pass", launch_mode=LaunchMode.attached)
-    final = launch_attached(req, store)
+    final = launch_attached(req, store, tmp_path)
 
     assert calls == [(TargetType.script, "-c", req.cwd, Path(sys.executable))]
     assert final.git_sha == "b" * 40
@@ -311,8 +316,8 @@ def _get_result(store: SessionStore, session_id: str) -> dict[str, object]:
     return dict(zip(cols, row, strict=True))
 
 
-def test_attached_exit_records_result_success(store: SessionStore) -> None:
-    final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached, name="res-ok"), store)
+def test_attached_exit_records_result_success(store: SessionStore, tmp_path: Path) -> None:
+    final = launch_attached(_script_request("pass", launch_mode=LaunchMode.attached, name="res-ok"), store, tmp_path)
     assert final.state == SessionState.exited
     result = _get_result(store, "res-ok")
     assert result["outcome"] == "exited"
@@ -321,9 +326,11 @@ def test_attached_exit_records_result_success(store: SessionStore) -> None:
     assert result["end_time"] is not None
 
 
-def test_attached_exit_records_result_failure(store: SessionStore) -> None:
+def test_attached_exit_records_result_failure(store: SessionStore, tmp_path: Path) -> None:
     final = launch_attached(
-        _script_request("import sys; sys.exit(42)", launch_mode=LaunchMode.attached, name="res-fail"), store
+        _script_request("import sys\nsys.exit(42)", launch_mode=LaunchMode.attached, name="res-fail"),
+        store,
+        tmp_path,
     )
     assert final.state == SessionState.failed
     result = _get_result(store, "res-fail")
@@ -411,7 +418,7 @@ def test_run_config_attached_beats_piped_stdin(tmp_path: Path, monkeypatch: pyte
     script.write_text("pass")
     captured: dict[str, LaunchMode] = {}
 
-    def capture(request: LaunchRequest, *_args: object) -> None:
+    def capture(*, request: LaunchRequest, **_kwargs: object) -> None:
         captured["mode"] = request.launch_mode
         raise typer.Exit(0)
 
@@ -420,6 +427,27 @@ def test_run_config_attached_beats_piped_stdin(tmp_path: Path, monkeypatch: pyte
     result = runner.invoke(cli, ["--config", str(config), "run", str(script)])
     assert result.exit_code == 0
     assert captured["mode"] == LaunchMode.attached
+
+
+def test_run_config_wires_helper_connect_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`[helper] connect_timeout` flows through `psoul run --record` to `launch_attached`."""
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    config = tmp_path / "psoul.toml"
+    config.write_text(
+        '[launch]\nmode = "attached"\n[session]\nrecord = true\n[helper]\nconnect_timeout = "0.1s"\n',
+    )
+    script = tmp_path / "noop.py"
+    script.write_text("pass")
+    captured: dict[str, float] = {}
+
+    def capture(*, helper_connect_timeout_seconds: float, **_kwargs: object) -> None:
+        captured["timeout"] = helper_connect_timeout_seconds
+        raise typer.Exit(0)
+
+    monkeypatch.setattr("psoul.cli.main.launch_attached", capture)
+    result = runner.invoke(cli, ["--config", str(config), "run", str(script)])
+    assert result.exit_code == 0
+    assert captured["timeout"] == pytest.approx(0.1)
 
 
 def test_duplicate_session_id_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -465,6 +493,75 @@ def test_status_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     json_result = runner.invoke(cli, ["status", "status-test", "--json"])
     assert json_result.exit_code == 0
     assert json.loads(json_result.output)["session_id"] == "status-test"
+
+
+@pytest.mark.parametrize(
+    ("helper_pid", "expected_helper"),
+    [(12345, True), (None, False)],
+    ids=["with_helper_pid", "without_helper_pid"],
+)
+def test_status_json_helper_field_reflects_helper_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_pid: int | None,
+    expected_helper: bool,
+) -> None:
+    """`status --json` exposes `helper: bool` derived from `session.helper_pid`."""
+    monkeypatch.setattr("psoul.core.db.default_state_dir", lambda: tmp_path)
+    _store_session(tmp_path, "helper-status")
+    if helper_pid is not None:
+        with closing(open_db(tmp_path)) as conn:
+            SessionStore(conn).update("helper-status", helper_pid=helper_pid)
+    result = runner.invoke(cli, ["status", "helper-status", "--json"])
+    assert result.exit_code == 0
+    detail = json.loads(result.output)
+    assert detail["helper"] is expected_helper
+
+
+def test_run_record_status_helper_true_while_child_alive(tmp_path: Path) -> None:
+    """Live regression: while a recorded `psoul run` child is alive, `status --json` reports `helper: true`.
+
+    Uses a real `python -m psoul` subprocess for the long-running ``run`` so the foreground ``status``
+    is the only `CliRunner` invocation (Click's `CliRunner` mutates global interpreter state and is
+    documented for single-threaded use).
+    """
+    config = tmp_path / "psoul.toml"
+    config.write_text(f'[paths]\nstate_dir = "{tmp_path}"\n')
+    script = tmp_path / "sleeper.py"
+    script.write_text("import time\ntime.sleep(1.5)\n")
+    proc = subprocess.Popen(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "psoul",
+            "--config",
+            str(config),
+            "run",
+            "--record",
+            "--name",
+            "live-helper",
+            str(script),
+        ],
+        cwd=tmp_path,
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        helper_seen = False
+        while time.monotonic() < deadline:
+            if (tmp_path / "psoul.db").exists():
+                with closing(open_db(tmp_path, create=False)) as conn:
+                    sess = SessionStore(conn).get("live-helper")
+                if sess is not None and sess.helper_pid is not None:
+                    helper_seen = True
+                    break
+            time.sleep(0.05)
+        assert helper_seen, "helper_pid never set within 5 seconds"
+        result = runner.invoke(cli, ["--config", str(config), "status", "live-helper", "--json"])
+        assert result.exit_code == 0
+        detail = json.loads(result.output)
+        assert detail["helper"] is True
+    finally:
+        proc.wait(timeout=10.0)
 
 
 def test_status_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

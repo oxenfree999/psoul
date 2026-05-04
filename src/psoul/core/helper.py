@@ -96,6 +96,12 @@ class HelperTransport:
         return json.loads(payload)
 
 
+class _EventWriter(Protocol):
+    """Structural type for the event-write callback used by :meth:`HelperLifecycle.emit_for_eof`."""
+
+    def __call__(self, event_type: str, payload: dict) -> None: ...
+
+
 class HelperLifecycle:
     """Owns the supervisor-side helper transport plus crash-vs-exit decision logic.
 
@@ -122,7 +128,7 @@ class HelperLifecycle:
         result = response.get("result")
         return result if isinstance(result, dict) else None
 
-    def emit_for_eof(self, *, child_alive: bool, event_writer: "_EventWriter") -> None:
+    def emit_for_eof(self, *, child_alive: bool, event_writer: _EventWriter) -> None:
         """Emit lifecycle events when the helper adapter sees EOF.
 
         ``event_writer`` is a callable taking ``(event_type, payload_dict)``. When the child process is still
@@ -138,9 +144,3 @@ class HelperLifecycle:
     def close(self) -> None:
         """Close the underlying transport. Idempotent."""
         self._transport.close()
-
-
-class _EventWriter(Protocol):
-    """Structural type for the event-write callback used by :meth:`HelperLifecycle.emit_for_eof`."""
-
-    def __call__(self, event_type: str, payload: dict) -> None: ...
