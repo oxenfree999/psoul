@@ -148,16 +148,30 @@ def test_watch_helper_eof_emits_events_only_when_child_alive(
     assert (EVENT_RUNTIME_STATUS in event_types) is expect_events
 
 
-def test_launch_attached_non_recorded_skips_helper_plumbing(
+@pytest.mark.parametrize(
+    ("record", "helper_supported", "session_id"),
+    [(False, True, "non-recorded"), (True, False, "recorded-windows")],
+    ids=["non_recorded_any_platform", "recorded_on_windows"],
+)
+def test_launch_attached_skips_helper_plumbing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    record: bool,
+    helper_supported: bool,
+    session_id: str,
 ) -> None:
+    """Helper plumbing is gated on `record_requested AND _HELPER_SUPPORTED`.
+
+    Non-recorded launches skip on any platform. Recorded launches on Windows skip too because the
+    Windows helper transport is not yet implemented (socketpair(AF_UNIX) and pass_fds are Unix only).
+    """
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("psoul.core.launch._HELPER_SUPPORTED", helper_supported)
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     target = tmp_path / "user.py"
     target.write_text("# stub\n")
-    request = _make_request("non-recorded", tmp_path, record=False)
+    request = _make_request(session_id, tmp_path, record=record)
     with closing(open_db(state_dir)) as conn:
         store = SessionStore(conn)
         launch_attached(

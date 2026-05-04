@@ -33,6 +33,7 @@ if sys.platform != "win32":
 
 PSOUL_HELPER_PIPE_ENV = "PSOUL_HELPER_PIPE"
 _HELPER_MODULE_NAME = "_psoul_helper"
+_HELPER_SUPPORTED = sys.platform != "win32"
 
 _MS_PER_SECOND = 1000
 _HELPER_WATCHER_POLL_INTERVAL_SECONDS = 0.25  # cadence at which the watcher rechecks proc.poll() and the socket
@@ -300,10 +301,12 @@ def launch_attached(
 ) -> Session:
     """Spawn a process with inherited stdio and wait for it to exit.
 
-    The CLI process itself acts as the supervisor in attached mode. When the launch is recorded
-    (``request.record_requested=True``) the supervisor wraps the user's argv with the
+    The CLI process itself acts as the supervisor in attached mode. On Unix when the launch is
+    recorded (``request.record_requested=True``) the supervisor wraps the user's argv with the
     ``_psoul_helper`` injection wrapper, opens a socketpair for the helper transport, runs the
     capabilities exchange, and starts a daemon watcher thread that emits crash events on EOF.
+    On Windows the helper transport is not yet implemented, so recorded launches still persist
+    the session but skip helper plumbing.
 
     Args:
         request (LaunchRequest): Resolved target, session ID, and launch options.
@@ -317,10 +320,11 @@ def launch_attached(
         Session: The completed session after the process has exited.
 
     """
-    if request.record_requested:
+    use_helper = request.record_requested and _HELPER_SUPPORTED
+    if use_helper:
         _check_cwd_collision(request.cwd)
     _create_session(request, store)
-    if request.record_requested:
+    if use_helper:
         parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         argv = _build_wrapper_argv(request.target.as_cmd())
         env = _build_helper_env(os.environ, child_sock.fileno())
