@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from psoul.cli.main import cli
 from psoul.core.config import (
     _GENERATED_SECTIONS,
+    HelperConfig,
     LaunchConfig,
     OutputConfig,
     PathsConfig,
@@ -82,6 +83,18 @@ def test_retention_config_defaults() -> None:
     assert config.max_artifact_mb == 500
 
 
+def test_helper_config_defaults() -> None:
+    config = HelperConfig()
+    assert config.connect_timeout == "5s"
+
+
+def test_load_config_helper_section(tmp_path: Path) -> None:
+    toml_file = tmp_path / "psoul.toml"
+    toml_file.write_text('[helper]\nconnect_timeout = "10s"\n')
+    config = load_config(toml_file)
+    assert config.helper.connect_timeout == "10s"
+
+
 def test_psoul_config_defaults() -> None:
     config = PsoulConfig()
     assert config.paths.state_dir is None
@@ -91,6 +104,7 @@ def test_psoul_config_defaults() -> None:
     assert config.session.tags is None
     assert config.output.format == "text"
     assert config.retention.max_age == "7d"
+    assert config.helper.connect_timeout == "5s"
 
 
 def test_psoul_config_override() -> None:
@@ -197,6 +211,7 @@ def test_load_config_rejects_unknown(tmp_path: Path, toml_content: str, match: s
     [
         ('[process]\nstop_timeout = "bogus"', r"\[process\] stop_timeout: invalid duration"),
         ('[retention]\nmax_age = "nope"', r"\[retention\] max_age: invalid duration"),
+        ('[helper]\nconnect_timeout = "bogus"', r"\[helper\] connect_timeout: invalid duration"),
     ],
 )
 def test_load_config_rejects_invalid_duration(tmp_path: Path, toml_content: str, match: str) -> None:

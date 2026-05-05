@@ -10,7 +10,7 @@ format:
 lint:
     uv run ruff check .
     uv run ruff format --check .
-    uv run ty check
+    uv run ty check src tests
 
 # Run the test suite
 [unix]

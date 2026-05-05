@@ -219,6 +219,20 @@ class RetentionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HelperConfig:
+    """[helper] section.
+
+    connect_timeout (str): how long to wait for the helper capabilities exchange before falling back to basic
+    mode. Default: '5s'.
+    """
+
+    connect_timeout: str = field(
+        default="5s",
+        metadata={"description": "how long to wait for helper capabilities exchange", "duration": True},
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class PsoulConfig:
     """Top-level configuration, composed from TOML sections.
 
@@ -229,6 +243,7 @@ class PsoulConfig:
     session (SessionConfig): [session] section.
     output (OutputConfig): [output] section.
     retention (RetentionConfig): [retention] section.
+    helper (HelperConfig): [helper] section.
     """
 
     paths: PathsConfig = PathsConfig()
@@ -238,6 +253,7 @@ class PsoulConfig:
     session: SessionConfig = SessionConfig()
     output: OutputConfig = OutputConfig()
     retention: RetentionConfig = RetentionConfig()
+    helper: HelperConfig = HelperConfig()
 
 
 _SECTION_CLASSES: dict[str, type] = {
@@ -248,6 +264,7 @@ _SECTION_CLASSES: dict[str, type] = {
     "session": SessionConfig,
     "output": OutputConfig,
     "retention": RetentionConfig,
+    "helper": HelperConfig,
 }
 
 _GENERATED_SECTIONS: frozenset[str] = frozenset({"paths", "python", "launch", "session"})

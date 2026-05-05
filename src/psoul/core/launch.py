@@ -2,24 +2,98 @@
 
 import contextlib
 import os
+import select
+import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 
+import psoul.helper
+from psoul.core.db import open_db
+from psoul.core.events import EVENT_HELPER_TIMEOUT, EventStore
+from psoul.core.helper import HelperLifecycle, HelperTransport
 from psoul.core.names import generate_session_id
 from psoul.core.provenance import gather
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType, validate_session_id
 from psoul.core.store import SessionStore
+from psoul.helper._psoul_helper import UnixHelperPipeAdapter
 from psoul.version import VERSION
 
 if sys.platform != "win32":
     from psoul.core.pty_spawn import _supervise
+
+
+PSOUL_HELPER_PIPE_ENV = "PSOUL_HELPER_PIPE"
+_HELPER_MODULE_NAME = "_psoul_helper"
+_HELPER_SUPPORTED = sys.platform != "win32"
+
+_MS_PER_SECOND = 1000
+_HELPER_WATCHER_POLL_INTERVAL_SECONDS = 0.25  # cadence at which the watcher rechecks proc.poll() and the socket
+
+
+def _helper_package_dir() -> Path:
+    """Return the directory holding ``_psoul_helper.py`` for PYTHONPATH injection."""
+    helper_init = psoul.helper.__file__
+    if helper_init is None:
+        msg = "psoul.helper has no __file__"
+        raise RuntimeError(msg)
+    return Path(helper_init).resolve().parent
+
+
+def _check_cwd_collision(cwd: Path) -> None:
+    """Raise ``ValueError`` if a ``_psoul_helper`` shadow lives in ``cwd``.
+
+    With ``python -m _psoul_helper``, ``sys.path[0]`` is ``""`` (CWD of the spawned child), so any
+    ``_psoul_helper.py`` file or ``_psoul_helper/`` directory in the user-target cwd would shadow our
+    wrapper before the prepended PYTHONPATH entry is consulted. Both file and directory shapes
+    (regular package, namespace package) are rejected. Caller passes ``request.cwd`` so the check
+    targets the spawned child's CWD, not the supervisor's.
+    """
+    file_shadow = cwd / f"{_HELPER_MODULE_NAME}.py"
+    dir_shadow = cwd / _HELPER_MODULE_NAME
+    if file_shadow.exists():
+        msg = f"{file_shadow} would shadow the psoul helper wrapper. Rename it before running with --record."
+        raise ValueError(msg)
+    if dir_shadow.is_dir():
+        msg = f"{dir_shadow} would shadow the psoul helper wrapper. Rename it before running with --record."
+        raise ValueError(msg)
+
+
+def _build_wrapper_argv(target_argv: Sequence[str]) -> list[str]:
+    """Prepend the wrapper invocation in front of the user's argv.
+
+    ``target_argv`` is the full python command line (``[python, target.py, *args]`` for script mode
+    or ``[python, "-m", module, *args]`` for module mode). The result inserts ``-m _psoul_helper``
+    between the interpreter and the user-intended argv so the wrapper imports as ``__main__`` before
+    user code runs.
+    """
+    if not target_argv:
+        msg = "target_argv must include the python interpreter"
+        raise ValueError(msg)
+    python, *rest = target_argv
+    return [python, "-m", _HELPER_MODULE_NAME, *rest]
+
+
+def _build_helper_env(parent_env: Mapping[str, str], helper_fd: int) -> dict[str, str]:
+    """Return a copy of ``parent_env`` with PSOUL_HELPER_PIPE set and PYTHONPATH prepended.
+
+    The helper-package directory is prepended (not appended) so a user-set PYTHONPATH cannot shadow
+    our wrapper. CWD shadowing is handled separately by :func:`_check_cwd_collision`.
+    """
+    env = dict(parent_env)
+    env[PSOUL_HELPER_PIPE_ENV] = str(helper_fd)
+    helper_dir = str(_helper_package_dir())
+    existing_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{helper_dir}{os.pathsep}{existing_path}" if existing_path else helper_dir
+    return env
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,24 +292,113 @@ def launch_headless(
     return session, child_pid
 
 
-def launch_attached(request: LaunchRequest, store: SessionStore) -> Session:
+def launch_attached(
+    request: LaunchRequest,
+    store: SessionStore,
+    state_dir: Path,
+    *,
+    helper_connect_timeout_seconds: float = 5.0,
+) -> Session:
     """Spawn a process with inherited stdio and wait for it to exit.
 
-    The CLI process itself acts as the supervisor in attached mode.
+    The CLI process itself acts as the supervisor in attached mode. On Unix when the launch is
+    recorded (``request.record_requested=True``) the supervisor wraps the user's argv with the
+    ``_psoul_helper`` injection wrapper, opens a socketpair for the helper transport, runs the
+    capabilities exchange, and starts a daemon watcher thread that emits crash events on EOF.
+    On Windows the helper transport is not yet implemented, so recorded launches still persist
+    the session but skip helper plumbing.
 
     Args:
         request (LaunchRequest): Resolved target, session ID, and launch options.
         store (SessionStore): Store for persisting the session.
+        state_dir (Path): State directory for the watcher's per-thread DB connection.
+        helper_connect_timeout_seconds (float): Total seconds budget for the
+            capabilities readiness exchange. Default 5.0 matches the
+            ``[helper] connect_timeout = "5s"`` config default.
 
     Returns:
         Session: The completed session after the process has exited.
 
     """
+    use_helper = request.record_requested and _HELPER_SUPPORTED
+    if use_helper:
+        _check_cwd_collision(request.cwd)
     _create_session(request, store)
-    proc = subprocess.Popen(request.target.as_cmd(), cwd=request.cwd)  # noqa: S603
-    store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
+    if use_helper:
+        parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        argv = _build_wrapper_argv(request.target.as_cmd())
+        env = _build_helper_env(os.environ, child_sock.fileno())
+        proc = subprocess.Popen(  # noqa: S603
+            argv,
+            cwd=request.cwd,
+            env=env,
+            pass_fds=[child_sock.fileno()],
+        )
+        child_sock.close()
+        store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
+        lifecycle = HelperLifecycle(HelperTransport(UnixHelperPipeAdapter(parent_sock)))
+        capabilities = lifecycle.request_capabilities(
+            timeout_ms=int(helper_connect_timeout_seconds * _MS_PER_SECOND),
+        )
+        if capabilities is None:
+            EventStore(store.conn).append(
+                session_id=request.session_id,
+                event_type=EVENT_HELPER_TIMEOUT,
+                payload=None,
+                generation=0,
+            )
+            lifecycle.close()
+        else:
+            store.update(request.session_id, helper_pid=proc.pid, helper_capabilities=capabilities)
+            threading.Thread(
+                target=_watch_helper_eof,
+                args=(state_dir, request.session_id, parent_sock, lifecycle, proc),
+                daemon=True,
+            ).start()
+    else:
+        proc = subprocess.Popen(request.target.as_cmd(), cwd=request.cwd)  # noqa: S603
+        store.update(request.session_id, state=SessionState.running, supervisor_pid=os.getpid())
     wait_for_exit(request.session_id, proc, store)
     return store.update(request.session_id, supervisor_pid=None)
+
+
+def _watch_helper_eof(
+    state_dir: Path,
+    session_id: str,
+    helper_sock: socket.socket,
+    lifecycle: HelperLifecycle,
+    proc: subprocess.Popen[bytes],
+) -> None:
+    """Daemon thread: watch the helper socket for EOF and emit lifecycle events.
+
+    Opens its own SQLite connection because the main thread's ``SessionStore`` is bound to its own
+    connection (sqlite ``check_same_thread=True``). Closes the lifecycle (and the underlying socket)
+    on exit via :func:`contextlib.closing`.
+    """
+    with closing(lifecycle):
+        while proc.poll() is None:
+            ready, _, _ = select.select([helper_sock], [], [], _HELPER_WATCHER_POLL_INTERVAL_SECONDS)
+            if helper_sock in ready:
+                try:
+                    data = helper_sock.recv(1, socket.MSG_PEEK)
+                except OSError:
+                    break
+                if not data:
+                    break
+                break
+        child_alive = proc.poll() is None
+        with closing(open_db(state_dir, create=False)) as conn:
+            SessionStore(conn).update(session_id, helper_pid=None, helper_capabilities=None)
+            ev_store = EventStore(conn)
+            lifecycle.emit_for_eof(
+                child_alive=child_alive,
+                event_writer=lambda event_type, payload: ev_store.append(
+                    session_id=session_id,
+                    event_type=event_type,
+                    payload=payload,
+                    generation=0,
+                ),
+            )
 
 
 def wait_for_exit(
