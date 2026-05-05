@@ -14,12 +14,10 @@ import pytest
 from psoul.helper._psoul_helper import (
     PSOUL_HELPER_PIPE_ENV,
     UnixHelperPipeAdapter,
-    WindowsHelperPipeAdapter,
     _dispatch,
     _dispatch_loop,
     _main,
     _open_adapter,
-    _open_windows_adapter,
     _read_frame,
     _run_user_target,
     _write_frame,
@@ -30,44 +28,14 @@ _AdapterPair = tuple[UnixHelperPipeAdapter, UnixHelperPipeAdapter]
 _HELPER_MODULE = "psoul.helper._psoul_helper"
 
 
-class _BrokenPipeOSError(OSError):
-    """OSError carrying ``winerror = ERROR_BROKEN_PIPE`` (109).
-
-    The Windows adapter calls ``getattr(e, "winerror", None)`` to map
-    Win32 broken-pipe errors to ``EOFError``. Tests use this subclass
-    to exercise that mapping on non-Windows platforms.
-    """
-
-    winerror = 109
-
-
 @pytest.fixture
 def adapter_pair() -> Iterator[_AdapterPair]:
-    if sys.platform == "win32":
-        pytest.skip("helper transport is Unix-only (socket.AF_UNIX unavailable)")
     sock_a, sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     adapter_a = UnixHelperPipeAdapter(sock_a)
     adapter_b = UnixHelperPipeAdapter(sock_b)
     yield adapter_a, adapter_b
     adapter_a.close()
     adapter_b.close()
-
-
-@pytest.fixture
-def fake_winapi(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Install a mocked ``_winapi`` so Windows code paths run on any platform."""
-    fake = MagicMock()
-    fake.ERROR_IO_PENDING = 997
-    fake.ERROR_BROKEN_PIPE = 109
-    fake.WAIT_OBJECT_0 = 0
-    fake.WAIT_TIMEOUT = 0x102
-    fake.INFINITE = 0xFFFFFFFF
-    fake.GENERIC_READ = 0x80000000
-    fake.GENERIC_WRITE = 0x40000000
-    fake.OPEN_EXISTING = 3
-    fake.FILE_FLAG_OVERLAPPED = 0x40000000
-    monkeypatch.setattr(f"{_HELPER_MODULE}._winapi", fake)
-    return fake
 
 
 @pytest.mark.parametrize(
@@ -151,7 +119,6 @@ def test_open_adapter_returns_none_without_env(
     assert _open_adapter() is None
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="unix socket path")
 def test_open_adapter_returns_unix_adapter_when_env_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -165,17 +132,6 @@ def test_open_adapter_returns_unix_adapter_when_env_set(
             assert isinstance(adapter, UnixHelperPipeAdapter)
 
 
-def test_open_adapter_dispatches_to_windows_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(PSOUL_HELPER_PIPE_ENV, r"\\.\pipe\fake")
-    monkeypatch.setattr(sys, "platform", "win32")
-    sentinel = MagicMock(spec=WindowsHelperPipeAdapter)
-    monkeypatch.setattr(f"{_HELPER_MODULE}._open_windows_adapter", lambda pipe: sentinel)
-    assert _open_adapter() is sentinel
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="unix socket path")
 def test_unix_adapter_close_is_idempotent() -> None:
     sock_a, sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     with sock_b:
@@ -188,77 +144,6 @@ def test_unix_adapter_recv_raises_on_timeout(adapter_pair: _AdapterPair) -> None
     helper_adapter, _test_adapter = adapter_pair
     with pytest.raises(TimeoutError):
         helper_adapter.recv(4, timeout=0.05)
-
-
-def test_windows_adapter_init_raises_without_winapi(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(f"{_HELPER_MODULE}._winapi", None)
-    with pytest.raises(RuntimeError, match="_winapi"):
-        WindowsHelperPipeAdapter(handle=42)
-
-
-def test_windows_adapter_send_writes_via_winapi(fake_winapi: MagicMock) -> None:
-    payload = b"hello"
-    overlapped = MagicMock()
-    overlapped.GetOverlappedResult.return_value = (len(payload), 0)
-    fake_winapi.WriteFile.return_value = (overlapped, 0)
-    adapter = WindowsHelperPipeAdapter(handle=99)
-    adapter.send(payload)
-    fake_winapi.WriteFile.assert_called_once_with(99, payload, overlapped=True)
-
-
-def test_windows_adapter_send_raises_eof_on_broken_pipe(
-    fake_winapi: MagicMock,
-) -> None:
-    fake_winapi.WriteFile.side_effect = _BrokenPipeOSError()
-    adapter = WindowsHelperPipeAdapter(handle=99)
-    with pytest.raises(EOFError):
-        adapter.send(b"data")
-
-
-def test_windows_adapter_recv_returns_bytes(fake_winapi: MagicMock) -> None:
-    payload = b"abcd"
-    overlapped = MagicMock()
-    overlapped.GetOverlappedResult.return_value = (len(payload), 0)
-    overlapped.getbuffer.return_value = payload
-    fake_winapi.ReadFile.return_value = (overlapped, 0)
-    adapter = WindowsHelperPipeAdapter(handle=99)
-    assert adapter.recv(4) == payload
-
-
-def test_windows_adapter_recv_raises_on_timeout(fake_winapi: MagicMock) -> None:
-    overlapped = MagicMock()
-    fake_winapi.ReadFile.return_value = (overlapped, fake_winapi.ERROR_IO_PENDING)
-    fake_winapi.WaitForMultipleObjects.return_value = fake_winapi.WAIT_TIMEOUT
-    adapter = WindowsHelperPipeAdapter(handle=99)
-    with pytest.raises(TimeoutError):
-        adapter.recv(4, timeout=0.01)
-    overlapped.cancel.assert_called_once()
-
-
-def test_windows_adapter_recv_raises_eof_on_broken_pipe(
-    fake_winapi: MagicMock,
-) -> None:
-    fake_winapi.ReadFile.side_effect = _BrokenPipeOSError()
-    adapter = WindowsHelperPipeAdapter(handle=99)
-    with pytest.raises(EOFError):
-        adapter.recv(4)
-
-
-def test_windows_adapter_close_calls_close_handle(fake_winapi: MagicMock) -> None:
-    adapter = WindowsHelperPipeAdapter(handle=99)
-    adapter.close()
-    fake_winapi.CloseHandle.assert_called_once_with(99)
-    adapter.close()
-    assert fake_winapi.CloseHandle.call_count == 1
-
-
-def test_open_windows_adapter_calls_create_file(fake_winapi: MagicMock) -> None:
-    fake_winapi.CreateFile.return_value = 99
-    adapter = _open_windows_adapter(r"\\.\pipe\foo")
-    assert isinstance(adapter, WindowsHelperPipeAdapter)
-    fake_winapi.CreateFile.assert_called_once()
 
 
 @patch(f"{_HELPER_MODULE}.runpy.run_module")

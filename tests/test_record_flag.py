@@ -1,6 +1,5 @@
 """End-to-end tests for the --record flag, [session] record config, and no-DB short-circuit behavior."""
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -106,10 +105,6 @@ def test_no_db_read_side_exits_success(
     assert not (tmp_path / DB_NAME).exists()
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="control-side commands are Unix-only and emit a platform-rejection message on Windows",
-)
 @pytest.mark.parametrize(
     "command_args",
     [

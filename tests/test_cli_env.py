@@ -32,7 +32,6 @@ def mock_live_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(env_module, "_get_tool_info", fake_tool)
     monkeypatch.setattr(env_module, "_get_venv", lambda: "/fake/.venv")
     monkeypatch.setenv("SHELL", "/fake/zsh")
-    monkeypatch.delenv("COMSPEC", raising=False)
     monkeypatch.setattr(env_module.shutil, "which", lambda name: f"/fake/bin/{name}" if name == "uv" else None)
     monkeypatch.setattr(
         env_module.subprocess,
@@ -65,10 +64,9 @@ def test_get_current_env_happy_path(mock_live_env: None) -> None:
     ("env_vars", "expected"),
     [
         ({"SHELL": "/bin/zsh"}, "/bin/zsh"),
-        ({"COMSPEC": "C:\\Windows\\System32\\cmd.exe"}, "C:\\Windows\\System32\\cmd.exe"),
         ({}, None),
     ],
-    ids=["shell-only", "comspec-only", "neither"],
+    ids=["shell-only", "neither"],
 )
 def test_get_current_env_shell_detection(
     mock_live_env: None,
@@ -77,7 +75,6 @@ def test_get_current_env_shell_detection(
     expected: str | None,
 ) -> None:
     monkeypatch.delenv("SHELL", raising=False)
-    monkeypatch.delenv("COMSPEC", raising=False)
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
     info = env_module.get_current_env()

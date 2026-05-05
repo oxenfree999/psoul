@@ -1,8 +1,8 @@
 """Supervisor-side transport for the in-process Python helper.
 
-Wraps a pipe adapter (Unix socket or Windows named-pipe handle) and exposes a ``request`` method that sends a
-length-prefixed JSON envelope and returns the matching response. Single-flight model: a ``threading.Lock``
-serializes concurrent callers so requests never interleave on the wire.
+Wraps a Unix socket pipe adapter and exposes a ``request`` method that sends a length-prefixed JSON envelope
+and returns the matching response. Single-flight model: a ``threading.Lock`` serializes concurrent callers so
+requests never interleave on the wire.
 """
 
 import json

@@ -5,7 +5,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import TypedDict
 
 from psoul.core.session import TargetType
@@ -25,11 +25,6 @@ class SessionProvenance(TypedDict):
     host: str
     os: str
     arch: str
-
-
-def _is_absolute_target(target: str) -> bool:
-    """Return True for absolute paths on the current OS or Windows."""
-    return Path(target).is_absolute() or PureWindowsPath(target).is_absolute()
 
 
 def git_sha(cwd: Path) -> str | None:
@@ -145,7 +140,7 @@ def script_hash(target_type: TargetType, target: str | None, cwd: Path) -> str |
         return None
     if target in {"-c", "-"}:
         return None
-    path = Path(target) if _is_absolute_target(target) else cwd / target
+    path = Path(target) if Path(target).is_absolute() else cwd / target
     return file_hash(path)
 
 

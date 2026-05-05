@@ -166,7 +166,6 @@ def test_load_config_coerces_string_to_path(
 
 def test_load_config_expands_user_in_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser reads USERPROFILE first
     toml_file = tmp_path / "psoul.toml"
     toml_file.write_text('[paths]\nstate_dir = "~/foo"\n')
     config = load_config(toml_file)

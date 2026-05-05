@@ -3,7 +3,6 @@
 import json
 import os
 import signal
-import sys
 import time
 from contextlib import closing
 from datetime import UTC, datetime
@@ -26,13 +25,6 @@ from psoul.core.events import EventStore
 from psoul.core.session import LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
-
-if sys.platform == "win32":
-    pytest.skip(
-        "test_cli_restart.py exercises Unix-only psoul restart semantics. "
-        "The platform-rejection branch is covered on Unix via monkeypatched sys.platform.",
-        allow_module_level=True,
-    )
 
 runner = CliRunner()
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
@@ -232,15 +224,6 @@ def test_restart_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert result.exit_code == ExitCode.ERROR
     assert "permission denied signalling supervisor" in result.output
     assert f"(PID={os.getpid()})" in result.output
-
-
-def test_restart_on_windows_surfaces_platform_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Platform check short-circuits before DB access on Windows with a Unix-only error message."""
-    monkeypatch.setattr("psoul.cli.main.sys.platform", "win32")
-    result = runner.invoke(cli, ["restart", "any"])
-    assert result.exit_code == ExitCode.USAGE
-    assert "restart is Unix-only (macOS / Linux)" in result.output
-    assert "Windows support deferred" in result.output
 
 
 def _wait_for_state(state_dir: Path, session_id: str, target: SessionState, timeout: float = 3.0) -> None:

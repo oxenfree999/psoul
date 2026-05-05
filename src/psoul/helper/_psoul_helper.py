@@ -1,10 +1,10 @@
 """psoul Python helper loaded into recorded subprocesses.
 
 Invoked as ``python -m _psoul_helper <user-argv>`` from the
-supervisor's launch path. Opens the inherited transport (Unix
-socket fd or Windows named pipe), starts a daemon dispatch
-thread that handles requests over length-prefixed JSON, then
-restores the user's argv and runpys the user target.
+supervisor's launch path. Opens the inherited Unix socket fd,
+starts a daemon dispatch thread that handles requests over
+length-prefixed JSON, then restores the user's argv and runpys
+the user target.
 """
 
 import contextlib
@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 PSOUL_HELPER_PIPE_ENV = "PSOUL_HELPER_PIPE"
 
@@ -37,9 +37,8 @@ class _PipeAdapter(Protocol):
 class UnixHelperPipeAdapter:
     """Wrap a Unix socket as a length-prefixed byte stream.
 
-    Provides the same ``send`` / ``recv`` / ``close`` shape as
-    the Windows adapter so :class:`HelperTransport` can consume
-    either without branching.
+    Implements the ``send`` / ``recv`` / ``close`` shape that
+    :class:`HelperTransport` consumes.
     """
 
     def __init__(self, sock: socket.socket) -> None:
@@ -90,118 +89,6 @@ class UnixHelperPipeAdapter:
         """Close the underlying socket. Idempotent."""
         with contextlib.suppress(OSError):
             self._sock.close()
-
-
-_winapi: Any = None
-if sys.platform == "win32":
-    import _winapi  # type: ignore[no-redef]
-
-
-class WindowsHelperPipeAdapter:
-    """Wrap a Windows named-pipe handle as a length-prefixed byte stream.
-
-    Provides the same shape as :class:`UnixHelperPipeAdapter`. Uses
-    the overlapped-I/O pattern from
-    :class:`multiprocessing.connection.PipeConnection`. Module-level
-    ``_winapi`` is the live ``_winapi`` stdlib module on Windows and
-    ``None`` elsewhere. Tests replace it with a mock to exercise
-    these methods on non-Windows platforms.
-    """
-
-    def __init__(self, handle: int) -> None:
-        if _winapi is None:
-            msg = "WindowsHelperPipeAdapter requires _winapi"
-            raise RuntimeError(msg)
-        self._handle = handle
-
-    def send(self, data: bytes) -> None:
-        """Block until ``data`` is fully sent.
-
-        Raises:
-            EOFError: The peer closed the pipe before the write completed.
-
-        """
-        try:
-            ov, err = _winapi.WriteFile(self._handle, data, overlapped=True)
-            if err == _winapi.ERROR_IO_PENDING:
-                _winapi.WaitForMultipleObjects(
-                    [ov.event],
-                    False,
-                    _winapi.INFINITE,
-                )
-            nwritten, _err = ov.GetOverlappedResult(True)
-        except OSError as e:
-            if getattr(e, "winerror", None) == _winapi.ERROR_BROKEN_PIPE:
-                raise EOFError from e
-            raise
-        if nwritten != len(data):
-            msg = f"partial write: {nwritten}/{len(data)}"
-            raise OSError(msg)
-
-    def recv(self, maxsize: int, timeout: float | None = None) -> bytes:
-        """Read exactly ``maxsize`` bytes, raising on EOF or timeout.
-
-        Args:
-            maxsize: Number of bytes to read.
-            timeout: Total seconds budget. ``None`` blocks
-                indefinitely.
-
-        Returns:
-            The ``maxsize`` bytes read from the pipe.
-
-        Raises:
-            EOFError: The peer closed the pipe before ``maxsize``
-                bytes were read.
-            TimeoutError: ``timeout`` elapsed before ``maxsize``
-                bytes were read.
-
-        """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        chunks: list[bytes] = []
-        remaining = maxsize
-        while remaining > 0:
-            if deadline is None:
-                timeout_ms = _winapi.INFINITE
-            else:
-                remaining_time = deadline - time.monotonic()
-                if remaining_time <= 0:
-                    raise TimeoutError
-                timeout_ms = int(remaining_time * 1000)
-            try:
-                ov, err = _winapi.ReadFile(
-                    self._handle,
-                    remaining,
-                    overlapped=True,
-                )
-                if err == _winapi.ERROR_IO_PENDING:
-                    waitres = _winapi.WaitForMultipleObjects(
-                        [ov.event],
-                        False,
-                        timeout_ms,
-                    )
-                    if waitres == _winapi.WAIT_TIMEOUT:
-                        ov.cancel()
-                        raise TimeoutError
-                ov.GetOverlappedResult(True)
-                chunk = bytes(ov.getbuffer())
-            except OSError as e:
-                if getattr(e, "winerror", None) == _winapi.ERROR_BROKEN_PIPE:
-                    raise EOFError from e
-                raise
-            if not chunk:
-                raise EOFError
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
-
-    def close(self) -> None:
-        """Close the underlying handle. Idempotent."""
-        handle = self._handle
-        if handle == 0:
-            return
-        self._handle = 0
-        with contextlib.suppress(OSError):
-            _winapi.CloseHandle(handle)
 
 
 _CMD_CAPABILITIES = "capabilities"
@@ -282,25 +169,7 @@ def _dispatch_loop(adapter: _PipeAdapter) -> None:
         adapter.close()
 
 
-def _open_windows_adapter(pipe: str) -> WindowsHelperPipeAdapter:
-    """Open a Windows named-pipe adapter.
-
-    Extracted so tests can mock ``_winapi`` independently of the
-    platform branch in :func:`_open_adapter`.
-    """
-    handle = _winapi.CreateFile(
-        pipe,
-        _winapi.GENERIC_READ | _winapi.GENERIC_WRITE,
-        0,
-        None,
-        _winapi.OPEN_EXISTING,
-        _winapi.FILE_FLAG_OVERLAPPED,
-        None,
-    )
-    return WindowsHelperPipeAdapter(handle)
-
-
-def _open_adapter() -> _PipeAdapter | None:
+def _open_adapter() -> UnixHelperPipeAdapter | None:
     """Open the adapter from the ``PSOUL_HELPER_PIPE`` env var.
 
     Returns ``None`` when the env var is unset (the wrapper bails
@@ -309,8 +178,6 @@ def _open_adapter() -> _PipeAdapter | None:
     pipe = os.environ.get(PSOUL_HELPER_PIPE_ENV)
     if not pipe:
         return None
-    if sys.platform == "win32":
-        return _open_windows_adapter(pipe)
     sock = socket.socket(fileno=int(pipe))
     return UnixHelperPipeAdapter(sock)
 

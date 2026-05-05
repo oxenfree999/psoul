@@ -4,6 +4,8 @@
 
 Sessions are now ephemeral by default. Pass `--record` to opt in to persistence.
 
+Native support is now Linux and macOS. Windows users should use WSL.
+
 ### Changed
 
 - `psoul run` and `psoul repl` no longer record to disk by default. Pass `--record`, set `[session] record = true` in config, or launch with `--headless` to opt in.
@@ -15,6 +17,17 @@ Sessions are now ephemeral by default. Pass `--record` to opt in to persistence.
 
 - `--record/-r` flag on `psoul run` and `psoul repl`.
 - `[session] record` config option.
+
+### Removed
+
+#### Native Windows Support
+
+- the Windows helper named-pipe adapter
+- Windows-only branches on `stop`, `kill`, `pause`, `resume`, `restart`, `signal`, and `attach`
+- Windows-specific test skips and fixtures
+- the `_HELPER_SUPPORTED` gate
+- `PureWindowsPath` provenance handling
+- the `COMSPEC` shell fallback
 
 ## [0.0.4] - 2026-04-29
 
