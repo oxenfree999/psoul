@@ -43,6 +43,8 @@ class _BrokenPipeOSError(OSError):
 
 @pytest.fixture
 def adapter_pair() -> Iterator[_AdapterPair]:
+    if sys.platform == "win32":
+        pytest.skip("helper transport is Unix-only (socket.AF_UNIX unavailable)")
     sock_a, sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     adapter_a = UnixHelperPipeAdapter(sock_a)
     adapter_b = UnixHelperPipeAdapter(sock_b)
@@ -173,6 +175,7 @@ def test_open_adapter_dispatches_to_windows_path(
     assert _open_adapter() is sentinel
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="unix socket path")
 def test_unix_adapter_close_is_idempotent() -> None:
     sock_a, sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     with sock_b:

@@ -3,6 +3,7 @@
 import json
 import socket
 import struct
+import sys
 import threading
 from collections.abc import Iterator
 from unittest.mock import MagicMock
@@ -18,6 +19,8 @@ _FRAME_HEADER = struct.Struct(">I")
 
 @pytest.fixture
 def adapter_pair() -> Iterator[_AdapterPair]:
+    if sys.platform == "win32":
+        pytest.skip("helper transport is Unix-only (socket.AF_UNIX unavailable)")
     sock_a, sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     transport_side = UnixHelperPipeAdapter(sock_a)
     helper_side = UnixHelperPipeAdapter(sock_b)

@@ -90,7 +90,7 @@ def test_build_helper_env_sets_pipe_var_and_prepends_pythonpath() -> None:
     env = _build_helper_env(parent, helper_fd=42)
     assert env[PSOUL_HELPER_PIPE_ENV] == "42"
     pythonpath_entries = env["PYTHONPATH"].split(os.pathsep)
-    assert pythonpath_entries[0].endswith("psoul/helper")
+    assert pythonpath_entries[0].endswith(str(Path("psoul") / "helper"))
     assert pythonpath_entries[-1] == "/user/path"
     assert env["OTHER"] == "x"
 
@@ -111,6 +111,7 @@ def state_with_session(tmp_path: Path) -> tuple[Path, str]:
     return state_dir, session_id
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="watcher uses socket.socketpair(AF_UNIX)")
 @pytest.mark.parametrize(
     ("child_alive_after_eof", "expect_events"),
     [(True, True), (False, False)],
@@ -211,6 +212,7 @@ def test_launch_attached_recorded_capabilities_succeed(tmp_path: Path) -> None:
     assert "helper.crashed" not in event_types
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="collision check is gated on _HELPER_SUPPORTED")
 def test_launch_attached_collision_emits_usage_error_and_no_session_row(
     tmp_path: Path,
 ) -> None:

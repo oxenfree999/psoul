@@ -518,6 +518,7 @@ def test_status_json_helper_field_reflects_helper_pid(
     assert detail["helper"] is expected_helper
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="helper transport is Unix-only, helper_pid never set on Windows")
 def test_run_record_status_helper_true_while_child_alive(tmp_path: Path) -> None:
     """Live regression: while a recorded `psoul run` child is alive, `status --json` reports `helper: true`.
 
