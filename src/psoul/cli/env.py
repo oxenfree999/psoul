@@ -77,7 +77,7 @@ def get_current_env() -> dict[str, Any]:
             "release": platform.release(),
             "machine": platform.machine(),
         },
-        "shell": os.environ.get("SHELL") or os.environ.get("COMSPEC") or None,
+        "shell": os.environ.get("SHELL") or None,
         "directory": str(Path.cwd()),
         "venv": _get_venv(),
         "interpreter": sys.executable,

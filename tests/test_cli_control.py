@@ -2,7 +2,6 @@
 
 import json
 import os
-import sys
 import time
 from contextlib import closing
 from datetime import UTC, datetime
@@ -30,13 +29,6 @@ from psoul.core.events import EventStore
 from psoul.core.session import LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
-
-if sys.platform == "win32":
-    pytest.skip(
-        "test_cli_control.py exercises Unix-only psoul stop / kill semantics. "
-        "The platform-rejection branch is covered on Unix via monkeypatched sys.platform.",
-        allow_module_level=True,
-    )
 
 runner = CliRunner()
 requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (Unix)")
@@ -281,15 +273,6 @@ def test_stop_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert f"(PID={os.getpid()})" in result.output
 
 
-def test_stop_on_windows_surfaces_platform_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Platform check short-circuits before DB access on Windows with a Unix-only error message."""
-    monkeypatch.setattr("psoul.cli.main.sys.platform", "win32")
-    result = runner.invoke(cli, ["stop", "any"])
-    assert result.exit_code == ExitCode.USAGE
-    assert "stop is Unix-only (macOS / Linux)" in result.output
-    assert "Windows support deferred" in result.output
-
-
 @requires_fork
 @pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_stop_timeout_config_wiring_honors_1s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -428,15 +411,6 @@ def test_pause_resume_missing_supervisor_pid(
     result = runner.invoke(cli, [command, "seed"])
     assert result.exit_code == ExitCode.ERROR
     assert "session has no supervisor" in result.output
-
-
-@pytest.mark.parametrize("command", ["pause", "resume"], ids=["pause", "resume"])
-def test_pause_resume_on_windows_surfaces_platform_error(command: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.cli.main.sys.platform", "win32")
-    result = runner.invoke(cli, [command, "any"])
-    assert result.exit_code == ExitCode.USAGE
-    assert f"{command} is Unix-only (macOS / Linux)" in result.output
-    assert "Windows support deferred" in result.output
 
 
 @pytest.mark.parametrize(
@@ -828,14 +802,6 @@ def test_signal_missing_supervisor_pid(tmp_path: Path, monkeypatch: pytest.Monke
     result = runner.invoke(cli, ["signal", "seed", "USR1"])
     assert result.exit_code == ExitCode.ERROR
     assert "session has no supervisor" in result.output
-
-
-def test_signal_on_windows_surfaces_platform_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.cli.main.sys.platform", "win32")
-    result = runner.invoke(cli, ["signal", "any", "USR1"])
-    assert result.exit_code == ExitCode.USAGE
-    assert "signal is Unix-only" in result.output
-    assert "Windows support deferred" in result.output
 
 
 def test_signal_orphaned_validation_passes_runtime_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

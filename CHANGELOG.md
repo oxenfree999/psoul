@@ -4,6 +4,8 @@
 
 Sessions are now ephemeral by default. Pass `--record` to opt in to persistence.
 
+Native support is now Linux and macOS. Windows users should use WSL.
+
 ### Changed
 
 - `psoul run` and `psoul repl` no longer record to disk by default. Pass `--record`, set `[session] record = true` in config, or launch with `--headless` to opt in.
@@ -15,6 +17,21 @@ Sessions are now ephemeral by default. Pass `--record` to opt in to persistence.
 
 - `--record/-r` flag on `psoul run` and `psoul repl`.
 - `[session] record` config option.
+
+### Removed
+
+#### Windows Support
+
+The following are removed:
+
+- The `Operating System :: Microsoft :: Windows` classifier in `pyproject.toml`.
+- `windows-latest` in CI.
+- The `[windows]` test recipe in the `justfile`.
+- The Windows helper named-pipe adapter (`WindowsHelperPipeAdapter`).
+- Windows-only branches on `stop`, `kill`, `pause`, `resume`, `restart`, `signal`, or `attach`.
+- The `_HELPER_SUPPORTED` gate in `psoul.core.launch`.
+- `PureWindowsPath` provenance handling.
+- The `COMSPEC` shell fallback.
 
 ## [0.0.4] - 2026-04-29
 

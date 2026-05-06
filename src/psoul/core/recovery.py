@@ -2,7 +2,6 @@
 
 import os
 import sqlite3
-import sys
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
@@ -25,9 +24,9 @@ def check_pid(pid: int) -> ProcessStatus:
     Returns ``dead`` when the OS confirms no process with *pid* exists
     (``ProcessLookupError`` / ESRCH).  Returns ``alive`` when the
     signal succeeds or ``PermissionError`` (EPERM) indicates a process
-    is present.  Returns ``unknown`` for invalid PIDs (<=0), any other
-    ``OSError``, or platform quirks (Windows).  Callers must not
-    recover a session unless the status is ``dead``.
+    is present.  Returns ``unknown`` for invalid PIDs (<=0) or any
+    other ``OSError``.  Callers must not recover a session unless the
+    status is ``dead``.
 
     Limitation: this checks current PID occupancy, not process
     identity.  A ``dead`` result reliably means the original process
@@ -44,8 +43,6 @@ def check_pid(pid: int) -> ProcessStatus:
 
     """
     if pid <= 0:
-        return ProcessStatus.unknown
-    if sys.platform == "win32":
         return ProcessStatus.unknown
     try:
         os.kill(pid, 0)

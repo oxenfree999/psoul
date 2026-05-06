@@ -20,6 +20,7 @@ import tomlkit.exceptions
 import typer
 from typer.core import TyperGroup
 
+from psoul.cli.attach import run_attach_loop
 from psoul.cli.doctor import format_text, get_system_info
 from psoul.cli.env import format_text as format_env_text
 from psoul.cli.env import get_current_env, get_session_env
@@ -38,9 +39,6 @@ from psoul.core.recovery import recover_sessions
 from psoul.core.session import TERMINAL_STATES, LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
 from psoul.version import VERSION
-
-if sys.platform != "win32":
-    from psoul.cli.attach import run_attach_loop
 
 _SIGNAL_ACCEPT_STATES: frozenset[SessionState] = frozenset(
     {SessionState.running, SessionState.suspended, SessionState.orphaned}
@@ -430,14 +428,7 @@ def run(
 
 
 def _deliver_control_signal(ctx: typer.Context, selector: str, *, signame: str, verb: str) -> None:
-    """Resolve *selector*, validate state, and send the signal named *signame* to the supervisor.
-
-    *signame* is resolved to a `signal.Signals` value only after the platform
-    check, since names like ``SIGUSR1`` and ``SIGUSR2`` do not exist on Windows.
-    """
-    if sys.platform == "win32":
-        print(f"Error: {verb} is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
-        raise typer.Exit(ExitCode.USAGE)
+    """Resolve *selector*, validate state, and send the signal named *signame* to the supervisor."""
     sig = getattr(signal, signame)
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
@@ -526,14 +517,7 @@ def _deliver_child_pgroup_signal(
     verb: str,
     accept_state: SessionState,
 ) -> None:
-    """Resolve *selector*, validate state, and send the signal named *signame* to the child's process group.
-
-    *signame* is resolved to a `signal.Signals` value only after the platform
-    check, since names like ``SIGSTOP`` and ``SIGCONT`` do not exist on Windows.
-    """
-    if sys.platform == "win32":
-        print(f"Error: {verb} is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
-        raise typer.Exit(ExitCode.USAGE)
+    """Resolve *selector*, validate state, and send the signal named *signame* to the child's process group."""
     sig = getattr(signal, signame)
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
@@ -615,9 +599,6 @@ def _deliver_named_signal_to_pgroup(ctx: typer.Context, selector: str, raw_signa
     validation but typically fail at ``_resolve_child_pid`` because the
     supervisor is dead by definition.
     """
-    if sys.platform == "win32":
-        print("Error: signal is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
-        raise typer.Exit(ExitCode.USAGE)
     sig = _resolve_signal_name(raw_signal)
     state: GlobalState = ctx.obj
     cfg = _load_resolved_config(state.config_override)
@@ -672,9 +653,6 @@ def attach(
     session_id: Annotated[str, typer.Argument(help="Session ID or unique prefix.")],
 ) -> None:
     """Attach interactively to a running headless session. Detach with Ctrl-]."""
-    if sys.platform == "win32":
-        print("Error: attach is Unix-only (macOS / Linux). Windows support deferred.", file=sys.stderr)
-        raise typer.Exit(ExitCode.USAGE)
     gs: GlobalState = ctx.obj
     cfg = _load_resolved_config(gs.config_override)
     _, conn = _open_db_or_empty_state(cfg, missing_exit_code=ExitCode.USAGE)

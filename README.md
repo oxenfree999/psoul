@@ -42,7 +42,9 @@ just test     # run tests only
 just snap     # update inline snapshots
 ```
 
-CI runs on Ubuntu, macOS, and Windows across Python 3.12, 3.13, and 3.14.
+CI runs on Ubuntu and macOS across Python 3.12, 3.13, and 3.14.
+
+Native support is Linux and macOS. Windows users should use WSL.
 
 ## Contributing
 

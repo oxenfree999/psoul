@@ -46,11 +46,6 @@ def test_check_pid_invalid_returns_unknown() -> None:
     assert check_pid(-1) is ProcessStatus.unknown
 
 
-def test_check_pid_windows_returns_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("psoul.core.recovery.sys.platform", "win32")
-    assert check_pid(12345) is ProcessStatus.unknown
-
-
 @pytest.mark.parametrize(
     ("side_effect", "expected"),
     [
@@ -68,7 +63,6 @@ def test_check_pid_os_kill_outcomes(
         if side_effect is not None:
             raise side_effect
 
-    monkeypatch.setattr("psoul.core.recovery.sys.platform", "linux")
     monkeypatch.setattr("psoul.core.recovery.os.kill", fake_kill)
     assert check_pid(42) is expected
 

@@ -468,7 +468,7 @@ def test_headless_without_fork_prints_cli_error(tmp_path: Path, monkeypatch: pyt
     script.write_text("pass")
     result = runner.invoke(cli, ["run", "--headless", str(script)])
     assert result.exit_code == 1
-    assert "headless mode requires Unix" in result.output
+    assert "headless mode requires os.fork" in result.output
 
 
 def test_ps_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -518,7 +518,6 @@ def test_status_json_helper_field_reflects_helper_pid(
     assert detail["helper"] is expected_helper
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="helper transport is Unix-only, helper_pid never set on Windows")
 def test_run_record_status_helper_true_while_child_alive(tmp_path: Path) -> None:
     """Live regression: while a recorded `psoul run` child is alive, `status --json` reports `helper: true`.
 

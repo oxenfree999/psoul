@@ -160,21 +160,6 @@ def test_script_hash(
         assert result is None
 
 
-def test_script_hash_preserves_windows_absolute_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[Path] = []
-
-    def mock_file_hash(path: Path) -> str:
-        seen.append(path)
-        return "sha256:sunny-bunnies"
-
-    monkeypatch.setattr("psoul.core.provenance.file_hash", mock_file_hash)
-
-    result = script_hash(TargetType.script, r"C:\work\train.py", tmp_path)
-
-    assert result == "sha256:sunny-bunnies"
-    assert seen == [Path(r"C:\work\train.py")]
-
-
 def test_gather(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("psoul.core.provenance.shutil.which", lambda _: "/usr/bin/git")
 

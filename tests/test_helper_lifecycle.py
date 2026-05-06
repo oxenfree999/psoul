@@ -111,7 +111,6 @@ def state_with_session(tmp_path: Path) -> tuple[Path, str]:
     return state_dir, session_id
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="watcher uses socket.socketpair(AF_UNIX)")
 @pytest.mark.parametrize(
     ("child_alive_after_eof", "expect_events"),
     [(True, True), (False, False)],
@@ -149,30 +148,17 @@ def test_watch_helper_eof_emits_events_only_when_child_alive(
     assert (EVENT_RUNTIME_STATUS in event_types) is expect_events
 
 
-@pytest.mark.parametrize(
-    ("record", "helper_supported", "session_id"),
-    [(False, True, "non-recorded"), (True, False, "recorded-windows")],
-    ids=["non_recorded_any_platform", "recorded_on_windows"],
-)
-def test_launch_attached_skips_helper_plumbing(
+def test_launch_attached_non_recorded_skips_helper_plumbing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    record: bool,
-    helper_supported: bool,
-    session_id: str,
 ) -> None:
-    """Helper plumbing is gated on `record_requested AND _HELPER_SUPPORTED`.
-
-    Non-recorded launches skip on any platform. Recorded launches on Windows skip too because the
-    Windows helper transport is not yet implemented (socketpair(AF_UNIX) and pass_fds are Unix only).
-    """
+    """Non-recorded launches skip helper plumbing entirely."""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("psoul.core.launch._HELPER_SUPPORTED", helper_supported)
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     target = tmp_path / "user.py"
     target.write_text("# stub\n")
-    request = _make_request(session_id, tmp_path, record=record)
+    request = _make_request("non-recorded", tmp_path, record=False)
     with closing(open_db(state_dir)) as conn:
         store = SessionStore(conn)
         launch_attached(
@@ -212,7 +198,6 @@ def test_launch_attached_recorded_capabilities_succeed(tmp_path: Path) -> None:
     assert "helper.crashed" not in event_types
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="collision check is gated on _HELPER_SUPPORTED")
 def test_launch_attached_collision_emits_usage_error_and_no_session_row(
     tmp_path: Path,
 ) -> None:

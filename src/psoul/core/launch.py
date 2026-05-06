@@ -5,7 +5,6 @@ import os
 import select
 import socket
 import subprocess
-import sys
 import threading
 import time
 import traceback
@@ -22,18 +21,14 @@ from psoul.core.events import EVENT_HELPER_TIMEOUT, EventStore
 from psoul.core.helper import HelperLifecycle, HelperTransport
 from psoul.core.names import generate_session_id
 from psoul.core.provenance import gather
+from psoul.core.pty_spawn import _supervise
 from psoul.core.session import LaunchMode, Session, SessionState, TargetType, validate_session_id
 from psoul.core.store import SessionStore
 from psoul.helper._psoul_helper import UnixHelperPipeAdapter
 from psoul.version import VERSION
 
-if sys.platform != "win32":
-    from psoul.core.pty_spawn import _supervise
-
-
 PSOUL_HELPER_PIPE_ENV = "PSOUL_HELPER_PIPE"
 _HELPER_MODULE_NAME = "_psoul_helper"
-_HELPER_SUPPORTED = sys.platform != "win32"
 
 _MS_PER_SECOND = 1000
 _HELPER_WATCHER_POLL_INTERVAL_SECONDS = 0.25  # cadence at which the watcher rechecks proc.poll() and the socket
@@ -265,11 +260,11 @@ def launch_headless(
         tuple[Session, int]: The new session and the supervisor's PID.
 
     Raises:
-        NotImplementedError: Platform does not support ``os.fork`` (Windows).
+        NotImplementedError: Platform does not support ``os.fork``.
 
     """
     if not hasattr(os, "fork"):
-        msg = "headless mode requires Unix (macOS/Linux)"
+        msg = "headless mode requires os.fork"
         raise NotImplementedError(msg)
     session = _create_session(request, store)
     child_pid = os.fork()
@@ -301,12 +296,10 @@ def launch_attached(
 ) -> Session:
     """Spawn a process with inherited stdio and wait for it to exit.
 
-    The CLI process itself acts as the supervisor in attached mode. On Unix when the launch is
-    recorded (``request.record_requested=True``) the supervisor wraps the user's argv with the
+    The CLI process itself acts as the supervisor in attached mode. When the launch is recorded
+    (``request.record_requested=True``) the supervisor wraps the user's argv with the
     ``_psoul_helper`` injection wrapper, opens a socketpair for the helper transport, runs the
     capabilities exchange, and starts a daemon watcher thread that emits crash events on EOF.
-    On Windows the helper transport is not yet implemented, so recorded launches still persist
-    the session but skip helper plumbing.
 
     Args:
         request (LaunchRequest): Resolved target, session ID, and launch options.
@@ -320,7 +313,7 @@ def launch_attached(
         Session: The completed session after the process has exited.
 
     """
-    use_helper = request.record_requested and _HELPER_SUPPORTED
+    use_helper = request.record_requested
     if use_helper:
         _check_cwd_collision(request.cwd)
     _create_session(request, store)
