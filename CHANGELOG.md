@@ -20,14 +20,18 @@ Native support is now Linux and macOS. Windows users should use WSL.
 
 ### Removed
 
-#### Native Windows Support
+#### Windows Support
 
-- the Windows helper named-pipe adapter
-- Windows-only branches on `stop`, `kill`, `pause`, `resume`, `restart`, `signal`, and `attach`
-- Windows-specific test skips and fixtures
-- the `_HELPER_SUPPORTED` gate
-- `PureWindowsPath` provenance handling
-- the `COMSPEC` shell fallback
+The following are removed:
+
+- The `Operating System :: Microsoft :: Windows` classifier in `pyproject.toml`.
+- `windows-latest` in CI.
+- The `[windows]` test recipe in the `justfile`.
+- The Windows helper named-pipe adapter (`WindowsHelperPipeAdapter`).
+- Windows-only branches on `stop`, `kill`, `pause`, `resume`, `restart`, `signal`, or `attach`.
+- The `_HELPER_SUPPORTED` gate in `psoul.core.launch`.
+- `PureWindowsPath` provenance handling.
+- The `COMSPEC` shell fallback.
 
 ## [0.0.4] - 2026-04-29
 
