@@ -67,10 +67,15 @@ def test_help_shows_flags() -> None:
         assert flag in output
 
 
+def test_bare_psoul_prints_help() -> None:
+    result = runner.invoke(cli, [])
+    assert result.exit_code == 0
+    assert "Usage: psoul" in result.output
+
+
 @pytest.mark.parametrize(
     ("invocation", "needs_script", "needs_record"),
     [
-        pytest.param([], False, True, id="bare-psoul"),
         pytest.param(["run", "--record"], True, False, id="run"),
         pytest.param(["ps"], False, False, id="ps"),
         pytest.param(["status", "fake-id"], False, False, id="status"),

@@ -21,7 +21,6 @@ uvx psoul --help
 ## Quick start
 
 ```bash
-psoul                # interactive REPL with history
 psoul script.py      # launch a script with history
 psoul ps             # list sessions
 psoul status <id>    # inspect a session

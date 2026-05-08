@@ -138,17 +138,7 @@ def test_run_tag_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert session.tags == {"env": "dev", "team": "backend"}
 
 
-@pytest.mark.parametrize(
-    ("mock_target", "cli_args"),
-    [
-        ("psoul.cli.main.build_launch_request", ["run", "--tag", "env=prod", "noop.py"]),
-        ("psoul.cli.main.run_repl", ["repl", "--name", "tag-merge", "--tag", "env=prod"]),
-    ],
-    ids=["run", "repl"],
-)
-def test_command_merges_config_tags_with_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_target: str, cli_args: list[str]
-) -> None:
+def test_run_merges_config_tags_with_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _ = _write_config(tmp_path)
     config.write_text(f'{config.read_text()}\n[session.tags]\nenv = "dev"\nteam = "ops"\n')
     captured: dict[str, object] = {}
@@ -157,44 +147,19 @@ def test_command_merges_config_tags_with_cli(
         captured.update(kwargs)
         raise typer.Exit(0)
 
-    monkeypatch.setattr(mock_target, fake)
-    result = runner.invoke(cli, ["--config", str(config), *cli_args])
+    monkeypatch.setattr("psoul.cli.main.build_launch_request", fake)
+    result = runner.invoke(cli, ["--config", str(config), "run", "--tag", "env=prod", "noop.py"])
     assert result.exit_code == 0
     assert captured["tags"] == {"env": "prod", "team": "ops"}
-
-
-def test_repl_tag_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakePromptSession:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        def prompt(self, _message: str) -> str:
-            raise EOFError
-
-    monkeypatch.setattr("psoul.cli.repl.PromptSession", FakePromptSession)
-    config, state_dir = _write_config(tmp_path)
-    result = runner.invoke(
-        cli,
-        ["--config", str(config), "repl", "--name", "repl-tag", "--tag", "env=staging", "--tag", "team=backend"],
-    )
-    assert result.exit_code == 0
-    conn = open_db(state_dir)
-    try:
-        session = SessionStore(conn).get("repl-tag")
-    finally:
-        conn.close()
-    assert session is not None
-    assert session.tags == {"env": "staging", "team": "backend"}
 
 
 @pytest.mark.parametrize(
     "args",
     [
         ["run", "--name", "bad-tag-run", "--tag", "broken", "-m", "http.server"],
-        ["repl", "--name", "bad-tag-repl", "--tag", "broken"],
         ["ps", "--tag", "broken"],
     ],
-    ids=["run", "repl", "ps"],
+    ids=["run", "ps"],
 )
 def test_tag_cli_rejects_malformed_input(tmp_path: Path, args: list[str]) -> None:
     config, _state_dir = _write_config(tmp_path)

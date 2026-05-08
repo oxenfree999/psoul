@@ -33,6 +33,16 @@ The following are removed:
 - `PureWindowsPath` provenance handling.
 - The `COMSPEC` shell fallback.
 
+#### CLI REPL
+
+The following are removed:
+
+- The `psoul repl` Typer command.
+- The bare-`psoul` REPL launch in `src/psoul/cli/main.py`.
+- The `psoul.cli.repl` and `psoul.core.repl` modules.
+- The `prompt-toolkit>=3.0` and `pygments>=2.0` base dependencies in `pyproject.toml`.
+- The `tests/test_repl.py` and `tests/test_repl_cli.py` test files.
+
 ## [0.0.4] - 2026-04-29
 
 Control plane and interactive takeover. Stop, kill, pause, resume, restart, or signal a session, attach to a running headless session, prune old data, and inspect the active Python environment.

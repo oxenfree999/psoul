@@ -48,10 +48,8 @@ classifiers = [
 ]
 dependencies = [
     "platformdirs>=4.0",
-    "prompt-toolkit>=3.0",
     "psutil>=6.0",
     "ptyprocess>=0.7.0,<1",
-    "pygments>=2.0",
     "rich>=13.0",
     "structlog>=24.1",
     "tomlkit>=0.14",

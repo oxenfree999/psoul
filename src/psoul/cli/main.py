@@ -26,15 +26,14 @@ from psoul.cli.env import format_text as format_env_text
 from psoul.cli.env import get_current_env, get_session_env
 from psoul.cli.logging import configure_logging, resolve_log_level
 from psoul.cli.prune import PruneState, run_prune
-from psoul.cli.repl import run_repl, run_repl_ephemeral
 from psoul.cli.state import ColorMode, ExitCode, GlobalState, OutputFormat, resolve_color
 from psoul.core.artifacts import ArtifactStore
 from psoul.core.config import PsoulConfig, find_config_file, generate_config, inject_pyproject_config, load_config
 from psoul.core.control import handle_controller_acquired, handle_controller_released
-from psoul.core.db import DB_NAME, open_db, resolve_state_dir
+from psoul.core.db import open_db, resolve_state_dir
 from psoul.core.duration import parse_duration
 from psoul.core.events import EVENT_RUNTIME_STDERR, EVENT_RUNTIME_STDOUT, EventStore
-from psoul.core.launch import build_launch_request, launch_attached, launch_headless, resolve_session_id
+from psoul.core.launch import build_launch_request, launch_attached, launch_headless
 from psoul.core.recovery import recover_sessions
 from psoul.core.session import TERMINAL_STATES, LaunchMode, Session, SessionState
 from psoul.core.store import SessionStore
@@ -208,53 +207,8 @@ def _main(
     configure_logging(log_level, OutputFormat.text)
 
     if ctx.invoked_subcommand is None:
-        _launch_repl(ctx)
-
-
-def _launch_repl(
-    ctx: typer.Context,
-    name: str | None = None,
-    tag: list[str] | None = None,
-    record: bool = False,
-) -> None:
-    """Shared REPL launch logic for bare `psoul` and `psoul repl`."""
-    state: GlobalState = ctx.obj
-    cfg = _load_resolved_config(state.config_override)
-    try:
-        session_id = resolve_session_id(name)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise typer.Exit(ExitCode.USAGE) from exc
-    resolved_tags = parse_tags(tag, defaults=cfg.session.tags)
-    if not (record or cfg.session.record):
-        run_repl_ephemeral()
-        return
-    state_dir = resolve_state_dir(cfg.paths.state_dir)
-    conn = _open_db_or_exit(state_dir)
-    try:
-        recover_sessions(conn)
-        if SessionStore(conn).get(session_id) is not None:
-            print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
-            raise typer.Exit(ExitCode.ERROR)
-        run_repl(session_id, conn, db_path=state_dir / DB_NAME, tags=resolved_tags)
-    except sqlite3.IntegrityError:
-        print(f"Error: session ID already exists: {session_id}", file=sys.stderr)
-        raise typer.Exit(ExitCode.ERROR) from None
-    finally:
-        conn.close()
-
-
-@cli.command()
-def repl(
-    ctx: typer.Context,
-    name: Annotated[str | None, typer.Option("--name", help="Session ID.")] = None,
-    tag: Annotated[list[str] | None, typer.Option("--tag", help="Tag as key=value (repeatable).")] = None,
-    record: Annotated[
-        bool, typer.Option("--record", "-r", help="Save this session so `psoul ps` and other commands can find it.")
-    ] = False,
-) -> None:
-    """Start an interactive REPL session."""
-    _launch_repl(ctx, name=name, tag=tag, record=record)
+        print(ctx.get_help())
+        raise typer.Exit(ExitCode.SUCCESS)
 
 
 @cli.command()
