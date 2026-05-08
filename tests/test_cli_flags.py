@@ -70,7 +70,7 @@ def test_help_shows_flags() -> None:
 def test_bare_psoul_prints_help() -> None:
     result = runner.invoke(cli, [])
     assert result.exit_code == 0
-    assert "Usage: psoul" in result.output
+    assert "Usage: psoul" in typer.unstyle(result.output)
 
 
 @pytest.mark.parametrize(
