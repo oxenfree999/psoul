@@ -11,7 +11,7 @@ from psoul.core.db import DB_NAME, SCHEMA_VERSION, open_db, resolve_state_dir
 
 _INSERT_SESSION = (
     "INSERT INTO sessions (session_id, state, launch_mode, launch_time, target_type, psoul_version) "
-    "VALUES (?, 'running', 'attached', '2026-01-01T00:00:00', 'repl', '0.0.1')"
+    "VALUES (?, 'running', 'attached', '2026-01-01T00:00:00', 'script', '0.0.1')"
 )
 
 

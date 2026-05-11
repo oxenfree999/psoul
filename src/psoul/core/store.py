@@ -471,7 +471,7 @@ class SessionStore:
         Args:
             session_id (str): Session this result belongs to.
             outcome (str): How the session ended, e.g. ``"exited"`` or ``"failed"``.
-            exit_code (int | None): Process exit code, or ``None`` for REPL sessions.
+            exit_code (int | None): Process exit code, or ``None`` if not captured.
             end_time (datetime): When the session finished.
             duration_seconds (float): Wall-clock duration of the session.
 

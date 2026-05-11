@@ -40,7 +40,6 @@ class TargetType(StrEnum):
 
     script = "script"
     module = "module"
-    repl = "repl"
 
 
 TERMINAL_STATES: frozenset[SessionState] = frozenset({SessionState.exited, SessionState.failed})
@@ -147,7 +146,7 @@ class Session:
     control_epoch: int = 0
 
     # Target
-    target_type: TargetType = TargetType.repl
+    target_type: TargetType = TargetType.script
     target: str | None = None
     target_args: list[str] | None = None
     target_cwd: Path | None = None

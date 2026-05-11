@@ -128,7 +128,7 @@ def script_hash(target_type: TargetType, target: str | None, cwd: Path) -> str |
     ``-`` (stdin), and files that don't exist on disk.
 
     Args:
-        target_type (TargetType): Whether the target is a script, module, or repl.
+        target_type (TargetType): Whether the target is a script or module.
         target (str | None): Script path or module name.
         cwd (Path): Working directory for resolving relative paths.
 
@@ -150,12 +150,11 @@ def gather(target_type: TargetType, target: str | None, cwd: Path, python_path: 
     Captures git state, file hashes, and platform metadata at launch time.
 
     Args:
-        target_type (TargetType): Whether the target is a script, module, or repl.
+        target_type (TargetType): Whether the target is a script or module.
         target (str | None): Script path or module name.
         cwd (Path): Working directory for git and file lookups.
-        python_path (Path): Interpreter the session will run under — the
-            configured ``python.python_path`` for launched targets, or
-            ``sys.executable`` for the in-process REPL.
+        python_path (Path): Interpreter for the launched target, from the
+            configured ``python.python_path``.
 
     Returns:
         SessionProvenance: Dict of provenance fields ready to unpack into ``Session()``.
