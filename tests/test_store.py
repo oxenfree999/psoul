@@ -248,18 +248,3 @@ def test_delete_removes_session_and_cascades(store: SessionStore) -> None:
 def test_delete_missing_session_raises(store: SessionStore) -> None:
     with pytest.raises(KeyError, match="session not found"):
         store.delete("no-such-session")
-
-
-def test_delete_keeps_history_row_with_null_session_id(store: SessionStore) -> None:
-    """delete() leaves history rows in place with session_id cleared per ON DELETE SET NULL."""
-    store.create(_session(session_id="quick-fox-types-code"))
-    store.conn.execute(
-        "INSERT INTO history (session_id, timestamp, input) VALUES (?, ?, ?)",
-        ["quick-fox-types-code", "2026-01-01T00:00:00+00:00", "print('hi')"],
-    )
-    store.conn.commit()
-    store.delete("quick-fox-types-code")
-    row = store.conn.execute("SELECT session_id, input FROM history").fetchone()
-    assert row is not None
-    assert row["session_id"] is None
-    assert row["input"] == "print('hi')"

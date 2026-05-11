@@ -102,8 +102,6 @@ def test_schema_and_tables(db: sqlite3.Connection) -> None:
         "results",
         "events",
         "commands",
-        "history",
-        "history_fts",
         "artifacts",
         "resource_samples",
         "profiling_state",
@@ -183,27 +181,6 @@ def test_commands_null_message_ids_allowed(db: sqlite3.Connection) -> None:
             "INSERT INTO commands (session_id, timestamp, command, status) VALUES (?, ?, 'eval', 'ok')",
             ("s1", f"2026-01-01T00:00:0{i}"),
         )
-
-
-def test_history_set_null_on_session_delete(db: sqlite3.Connection) -> None:
-    db.execute(_INSERT_SESSION, ["s1"])
-    db.execute("INSERT INTO history (session_id, timestamp, input) VALUES ('s1', '2026-01-01T00:00:00', 'print(42)')")
-    db.execute("DELETE FROM sessions WHERE session_id = 's1'")
-    row = db.execute("SELECT session_id, input FROM history").fetchone()
-    assert row[0] is None
-    assert row[1] == "print(42)"
-
-
-def test_history_fts(db: sqlite3.Connection) -> None:
-    db.execute("INSERT INTO history (timestamp, input) VALUES ('2026-01-01T00:00:00', 'import pandas as pd')")
-    db.execute("INSERT INTO history (timestamp, input) VALUES ('2026-01-01T00:00:01', 'print(hello)')")
-    # Search finds matching row
-    rows = db.execute("SELECT input FROM history_fts WHERE input MATCH 'pandas'").fetchall()
-    assert len(rows) == 1
-    assert rows[0][0] == "import pandas as pd"
-    # Delete trigger removes from index
-    db.execute("DELETE FROM history WHERE input = 'import pandas as pd'")
-    assert db.execute("SELECT COUNT(*) FROM history_fts WHERE input MATCH 'pandas'").fetchone()[0] == 0
 
 
 def test_future_version_rejected(tmp_path: Path) -> None:

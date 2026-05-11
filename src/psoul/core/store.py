@@ -439,8 +439,7 @@ class SessionStore:
 
         ``events``, ``results``, ``commands``, ``artifacts``,
         ``resource_samples``, and ``profiling_state`` are removed via
-        ``ON DELETE CASCADE``.  ``history`` rows survive with their
-        ``session_id`` set to ``NULL`` per the ``ON DELETE SET NULL`` foreign-key clause.
+        ``ON DELETE CASCADE``.
 
         Args:
             session_id (str): Session to delete.
