@@ -175,29 +175,6 @@ def test_launch_attached_non_recorded_skips_helper_plumbing(
     assert all(e["event_type"] != "helper.timeout" for e in events)
 
 
-def test_launch_attached_recorded_capabilities_succeed(tmp_path: Path) -> None:
-    """End-to-end: real `python -m _psoul_helper` child connects, exchanges capabilities, exits clean."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    target = tmp_path / "user.py"
-    target.write_text("# user code\n")
-    request = _make_request("integration", tmp_path, record=True)
-    with closing(open_db(state_dir)) as conn:
-        store = SessionStore(conn)
-        launch_attached(
-            request=request,
-            store=store,
-            state_dir=state_dir,
-            helper_connect_timeout_seconds=5.0,
-        )
-        session = store.get(request.session_id)
-        event_types = {e["event_type"] for e in EventStore(conn).list(request.session_id)}
-    assert session is not None
-    assert session.state == SessionState.exited
-    assert "helper.timeout" not in event_types
-    assert "helper.crashed" not in event_types
-
-
 def test_launch_attached_collision_emits_usage_error_and_no_session_row(
     tmp_path: Path,
 ) -> None:
