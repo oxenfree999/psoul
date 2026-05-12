@@ -668,7 +668,7 @@ def ps(
         print(json.dumps([dataclasses.asdict(s) for s in sessions], default=str))
         return
     for s in sessions:
-        print(f"{s.session_id}  {s.state}  {s.target or 'repl'}  {s.launch_time.isoformat()}")
+        print(f"{s.session_id}  {s.state}  {s.target or '-'}  {s.launch_time.isoformat()}")
 
 
 @cli.command()

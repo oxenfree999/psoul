@@ -55,7 +55,7 @@ def test_launch_mode_values() -> None:
 
 
 def test_target_type_values() -> None:
-    assert {t.value for t in TargetType} == {"script", "module", "repl"}
+    assert {t.value for t in TargetType} == {"script", "module"}
 
 
 def test_every_state_has_transitions_entry() -> None:

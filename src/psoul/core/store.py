@@ -439,8 +439,7 @@ class SessionStore:
 
         ``events``, ``results``, ``commands``, ``artifacts``,
         ``resource_samples``, and ``profiling_state`` are removed via
-        ``ON DELETE CASCADE``.  ``history`` rows survive with their
-        ``session_id`` set to ``NULL`` per the ``ON DELETE SET NULL`` foreign-key clause.
+        ``ON DELETE CASCADE``.
 
         Args:
             session_id (str): Session to delete.
@@ -472,7 +471,7 @@ class SessionStore:
         Args:
             session_id (str): Session this result belongs to.
             outcome (str): How the session ended, e.g. ``"exited"`` or ``"failed"``.
-            exit_code (int | None): Process exit code, or ``None`` for REPL sessions.
+            exit_code (int | None): Process exit code, or ``None`` if not captured.
             end_time (datetime): When the session finished.
             duration_seconds (float): Wall-clock duration of the session.
 

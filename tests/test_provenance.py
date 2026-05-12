@@ -140,12 +140,11 @@ def test_find_lockfile_hash(tmp_path: Path, files: dict[str, bytes], expected_na
     [
         (TargetType.script, "train.py", True, True),
         (TargetType.module, "http.server", False, False),
-        (TargetType.repl, None, False, False),
         (TargetType.script, "-c", False, False),
         (TargetType.script, "-", False, False),
         (TargetType.script, "missing.py", False, False),
     ],
-    ids=["real-script", "module", "repl", "dash-c", "stdin", "missing-file"],
+    ids=["real-script", "module", "dash-c", "stdin", "missing-file"],
 )
 def test_script_hash(
     tmp_path: Path, target_type: TargetType, target: str | None, write_file: bool, expect_hash: bool

@@ -1,4 +1,4 @@
-"""SQLite storage layer for session data, events, history, and artifacts."""
+"""SQLite storage layer for session data, events, and artifacts."""
 
 import collections.abc
 import sqlite3
@@ -148,36 +148,6 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_commands_session ON commands(session_id, command_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_commands_message_id ON commands(message_id)
             WHERE message_id IS NOT NULL;
-
-        CREATE TABLE IF NOT EXISTS history (
-            history_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id  TEXT,
-            timestamp   TEXT NOT NULL,
-            input       TEXT NOT NULL,
-            cwd         TEXT,
-            FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE SET NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_id);
-        CREATE INDEX IF NOT EXISTS idx_history_timestamp ON history(timestamp);
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(
-            input,
-            content='history',
-            content_rowid='history_id'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS history_fts_insert AFTER INSERT ON history BEGIN
-            INSERT INTO history_fts(rowid, input) VALUES (new.history_id, new.input);
-        END;
-        CREATE TRIGGER IF NOT EXISTS history_fts_delete AFTER DELETE ON history BEGIN
-            INSERT INTO history_fts(history_fts, rowid, input)
-                VALUES ('delete', old.history_id, old.input);
-        END;
-        CREATE TRIGGER IF NOT EXISTS history_fts_update AFTER UPDATE ON history BEGIN
-            INSERT INTO history_fts(history_fts, rowid, input)
-                VALUES ('delete', old.history_id, old.input);
-            INSERT INTO history_fts(rowid, input) VALUES (new.history_id, new.input);
-        END;
 
         CREATE TABLE IF NOT EXISTS artifacts (
             artifact_id     INTEGER PRIMARY KEY AUTOINCREMENT,
