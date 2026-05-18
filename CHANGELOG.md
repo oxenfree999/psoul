@@ -1,22 +1,26 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.5] - 2026-05-17
 
 Sessions are now ephemeral by default. Pass `--record` to opt in to persistence.
 
 Native support is now Linux and macOS. Windows users should use WSL.
 
+The Python helper subprocess loads alongside attached recorded `psoul run` invocations and exchanges capabilities with the supervisor. `psoul status` exposes the helper state.
+
 ### Changed
 
-- `psoul run` and `psoul repl` no longer record to disk by default. Pass `--record`, set `[session] record = true` in config, or launch with `--headless` to opt in.
+- `psoul run` no longer records to disk by default. Pass `--record`, set `[session] record = true` in config, or launch with `--headless` to opt in.
 - Read-side commands (`ps`, `status`, `events`, `logs`, `stats`, `artifacts`, `env <session>`, `prune`) exit 0 with a single-line stderr message on a fresh home with no recorded sessions.
 - Control-side commands (`stop`, `kill`, `pause`, `resume`, `restart`, `signal`, `attach`) exit with a usage error and the same stderr message on a fresh home.
 - Existing session data from v0.0.4 stays in place. Use `psoul prune --all` to start fresh.
 
 ### Added
 
-- `--record/-r` flag on `psoul run` and `psoul repl`.
+- `--record/-r` flag on `psoul run`.
 - `[session] record` config option.
+- A Python helper subprocess on attached recorded `psoul run` invocations, with state exposed via `psoul status` (text and `--json`).
+- The `[helper] connect_timeout` config option for the helper capabilities exchange wait (default 5 seconds).
 
 ### Removed
 
@@ -42,6 +46,9 @@ The following are removed:
 - The `psoul.cli.repl` and `psoul.core.repl` modules.
 - The `prompt-toolkit>=3.0` and `pygments>=2.0` base dependencies in `pyproject.toml`.
 - The `tests/test_repl.py` and `tests/test_repl_cli.py` test files.
+- The `history` SQLite table and its FTS5 index.
+- The `TargetType.repl` enum value.
+- The `'repl'` fallback in `psoul ps` output (sessions with no target now display `-`).
 
 ## [0.0.4] - 2026-04-29
 
@@ -110,6 +117,7 @@ Initial release. Project foundation and core CLI.
 - Inline snapshot tests for CLI output.
 - CI on Ubuntu, macOS, and Windows across Python 3.12, 3.13, and 3.14.
 
+[0.0.5]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.5
 [0.0.4]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.4
 [0.0.3]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.3
 [0.0.2]: https://github.com/oxenfree999/psoul/releases/tag/v0.0.2
