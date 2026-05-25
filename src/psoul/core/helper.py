@@ -128,17 +128,24 @@ class HelperLifecycle:
         result = response.get("result")
         return result if isinstance(result, dict) else None
 
-    def emit_for_eof(self, *, child_alive: bool, event_writer: _EventWriter) -> None:
-        """Emit lifecycle events when the helper adapter sees EOF.
+    def emit_for_eof(self, *, returncode: int | None, event_writer: _EventWriter) -> None:
+        """Emit lifecycle events for the child status recovered after helper-pipe EOF.
 
-        ``event_writer`` is a callable taking ``(event_type, payload_dict)``. When the child process is still
-        alive but the helper closed its end of the pipe, the helper has crashed mid-run: emit
-        ``helper.crashed`` and ``runtime.status`` with ``helper_lost: true``. When the child has exited, the
-        EOF is the natural consequence of process teardown and the call returns silently.
+        ``returncode`` is the child's exit status from a bounded wait after EOF, or ``None`` when
+        the child outlived that wait. ``event_writer`` takes ``(event_type, payload_dict)``.
+
+        - ``returncode == 0``: a clean exit closed the pipe. Returns silently on the crash channel.
+        - ``returncode`` non-zero (non-zero exit, or negative ``-N`` signal death): the child died
+          abnormally. Emits ``helper.crashed`` carrying ``exit_code`` plus ``runtime.status`` with
+          ``helper_lost: true``.
+        - ``returncode is None``: the child outlived the wait, so the helper closed its end mid-run
+          while user code continues. Emits ``helper.crashed`` with an empty payload plus the same
+          ``runtime.status``.
         """
-        if not child_alive:
+        if returncode == 0:
             return
-        event_writer("helper.crashed", {})
+        payload: dict[str, object] = {} if returncode is None else {"exit_code": returncode}
+        event_writer("helper.crashed", payload)
         event_writer("runtime.status", {"helper_lost": True})
 
     def close(self) -> None:
