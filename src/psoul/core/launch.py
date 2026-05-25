@@ -32,6 +32,7 @@ _HELPER_MODULE_NAME = "_psoul_helper"
 
 _MS_PER_SECOND = 1000
 _HELPER_WATCHER_POLL_INTERVAL_SECONDS = 0.25  # cadence at which the watcher rechecks proc.poll() and the socket
+_HELPER_EOF_REAP_GRACE_SECONDS = 2.0  # The watcher waits this long after EOF for a clean child exit to be reaped.
 
 
 def _helper_package_dir() -> Path:
@@ -371,20 +372,24 @@ def _watch_helper_eof(
     with closing(lifecycle):
         while proc.poll() is None:
             ready, _, _ = select.select([helper_sock], [], [], _HELPER_WATCHER_POLL_INTERVAL_SECONDS)
-            if helper_sock in ready:
-                try:
-                    data = helper_sock.recv(1, socket.MSG_PEEK)
-                except OSError:
-                    break
-                if not data:
-                    break
+            if helper_sock not in ready:
+                continue
+            try:
+                data = helper_sock.recv(1, socket.MSG_PEEK)
+            except OSError:
                 break
-        child_alive = proc.poll() is None
+            if not data:
+                break
+            time.sleep(_HELPER_WATCHER_POLL_INTERVAL_SECONDS)  # Buffered data is a live frame, not EOF.
+        try:
+            returncode = proc.wait(timeout=_HELPER_EOF_REAP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            returncode = None
         with closing(open_db(state_dir, create=False)) as conn:
             SessionStore(conn).update(session_id, helper_pid=None, helper_capabilities=None)
             ev_store = EventStore(conn)
             lifecycle.emit_for_eof(
-                child_alive=child_alive,
+                returncode=returncode,
                 event_writer=lambda event_type, payload: ev_store.append(
                     session_id=session_id,
                     event_type=event_type,

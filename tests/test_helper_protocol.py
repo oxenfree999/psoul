@@ -139,16 +139,18 @@ def test_lifecycle_request_capabilities(kwargs: dict, expected: dict | None) -> 
 
 
 @pytest.mark.parametrize(
-    ("child_alive", "expected_calls"),
+    ("returncode", "expected_calls"),
     [
-        (False, []),
-        (True, [(("helper.crashed", {}),), (("runtime.status", {"helper_lost": True}),)]),
+        (0, []),
+        (None, [(("helper.crashed", {}),), (("runtime.status", {"helper_lost": True}),)]),
+        (1, [(("helper.crashed", {"exit_code": 1}),), (("runtime.status", {"helper_lost": True}),)]),
+        (-11, [(("helper.crashed", {"exit_code": -11}),), (("runtime.status", {"helper_lost": True}),)]),
     ],
-    ids=["child_exited", "child_alive"],
+    ids=["clean_exit", "child_alive", "nonzero_exit", "signal"],
 )
-def test_lifecycle_emit_for_eof(child_alive: bool, expected_calls: list) -> None:
+def test_lifecycle_emit_for_eof(returncode: int | None, expected_calls: list) -> None:
     writer = MagicMock()
-    HelperLifecycle(MagicMock(spec=HelperTransport)).emit_for_eof(child_alive=child_alive, event_writer=writer)
+    HelperLifecycle(MagicMock(spec=HelperTransport)).emit_for_eof(returncode=returncode, event_writer=writer)
     assert writer.call_args_list == expected_calls
 
 

@@ -2,6 +2,7 @@
 
 import os
 import socket
+import subprocess
 import sys
 import threading
 from contextlib import closing
@@ -112,19 +113,28 @@ def state_with_session(tmp_path: Path) -> tuple[Path, str]:
 
 
 @pytest.mark.parametrize(
-    ("child_alive_after_eof", "expect_events"),
-    [(True, True), (False, False)],
-    ids=["helper_crash", "child_exit"],
+    ("wait_result", "expect_events", "expected_crash_payload"),
+    [
+        ("timeout", True, {}),
+        (0, False, None),
+        (1, True, {"exit_code": 1}),
+    ],
+    ids=["helper_crash", "clean_exit", "nonclean_exit"],
 )
-def test_watch_helper_eof_emits_events_only_when_child_alive(
+def test_watch_helper_eof_emits_events_only_on_crash(
     state_with_session: tuple[Path, str],
-    child_alive_after_eof: bool,
+    wait_result: str | int,
     expect_events: bool,
+    expected_crash_payload: dict[str, object] | None,
 ) -> None:
     state_dir, session_id = state_with_session
     parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     proc = MagicMock()
-    proc.poll.side_effect = [None, None if child_alive_after_eof else 0]
+    proc.poll.return_value = None
+    if wait_result == "timeout":
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="child", timeout=2.0)
+    else:
+        proc.wait.return_value = wait_result
     lifecycle = HelperLifecycle(MagicMock())
 
     with parent_sock:
@@ -146,6 +156,33 @@ def test_watch_helper_eof_emits_events_only_when_child_alive(
     event_types = {e["event_type"] for e in events}
     assert (EVENT_HELPER_CRASHED in event_types) is expect_events
     assert (EVENT_RUNTIME_STATUS in event_types) is expect_events
+    if expect_events:
+        crashed = next(e for e in events if e["event_type"] == EVENT_HELPER_CRASHED)
+        assert crashed["payload"] == expected_crash_payload
+
+
+def test_watch_helper_eof_ignores_in_flight_frame(
+    state_with_session: tuple[Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readable in-flight frame is not EOF, so the watcher keeps watching until real EOF."""
+    state_dir, session_id = state_with_session
+    helper_sock = MagicMock()
+    helper_sock.recv.side_effect = [b"\x01", b""]
+    select_calls = iter([([], [], []), ([helper_sock], [], []), ([helper_sock], [], [])])
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.wait.side_effect = subprocess.TimeoutExpired(cmd="child", timeout=2.0)
+    monkeypatch.setattr("select.select", lambda *_: next(select_calls))
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    _watch_helper_eof(state_dir, session_id, helper_sock, HelperLifecycle(MagicMock()), proc)
+
+    with closing(open_db(state_dir, create=False)) as conn:
+        events = EventStore(conn).list(session_id)
+    assert helper_sock.recv.call_count == 2
+    crashed = [e for e in events if e["event_type"] == EVENT_HELPER_CRASHED]
+    assert len(crashed) == 1
 
 
 def test_launch_attached_non_recorded_skips_helper_plumbing(
