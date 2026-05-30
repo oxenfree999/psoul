@@ -20,6 +20,8 @@ from psoul.helper._psoul_helper import (
     _open_adapter,
     _read_frame,
     _run_user_target,
+    _safe_repr,
+    _session_globals,
     _write_frame,
 )
 
@@ -57,7 +59,7 @@ def test_dispatch_status_and_id_echo(command: str, expected_status: str) -> None
 
 def test_dispatch_capabilities_result_shape() -> None:
     response = _dispatch({"id": "c", "command": "capabilities"})
-    assert response["result"]["commands"] == ["capabilities", "ping"]
+    assert response["result"]["commands"] == ["capabilities", "eval", "ping"]
     assert response["result"]["backends"] == []
     assert len(response["result"]["python_version"]) == 3
 
@@ -68,9 +70,130 @@ def test_dispatch_ping_result_is_pong() -> None:
 
 
 @pytest.mark.parametrize(
+    ("code", "expected_value", "expected_type"),
+    [
+        ("1 + 1", "2", "int"),
+        ("x = 5", "None", "NoneType"),
+        ("x = 5\nx + 3", "8", "int"),
+    ],
+    ids=["single_expression", "statement_only", "multi_statement"],
+)
+def test_dispatch_eval_returns_value_and_type(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    expected_value: str,
+    expected_type: str,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "e",
+            "command": "eval",
+            "params": {"code": code},
+        }
+    )
+    assert response["status"] == "ok"
+    assert response["result"] == {"value": expected_value, "type": expected_type}
+
+
+def test_dispatch_eval_mutates_session_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    _dispatch(
+        {
+            "id": "e",
+            "command": "eval",
+            "params": {"code": "x = 42"},
+        }
+    )
+    assert ns["x"] == 42
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_exc_name"),
+    [
+        ("undefined_name_xyz", "NameError"),
+        ("def foo(:", "SyntaxError"),
+        ("raise SystemExit('bye')", "SystemExit"),
+    ],
+    ids=["name_error", "syntax_error", "system_exit"],
+)
+def test_dispatch_eval_returns_eval_failed_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    expected_exc_name: str,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "e",
+            "command": "eval",
+            "params": {"code": code},
+        }
+    )
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "eval_failed"
+    assert expected_exc_name in response["error"]["message"]
+    assert "Traceback" in response["error"]["traceback"]
+
+
+@pytest.mark.parametrize(
     "request_in",
     [
-        {"id": "r1", "command": "eval"},
+        {"id": "e", "command": "eval"},
+        {"id": "e", "command": "eval", "params": {}},
+        {"id": "e", "command": "eval", "params": None},
+        {"id": "e", "command": "eval", "params": {"code": 123}},
+        {"id": "e", "command": "eval", "params": 1},
+        {"id": "e", "command": "eval", "params": True},
+        {"id": "e", "command": "eval", "params": "abcd"},
+        {"id": "e", "command": "eval", "params": [1, 2, 3]},
+    ],
+    ids=[
+        "no_params",
+        "empty_params",
+        "null_params",
+        "non_string_code",
+        "int_params",
+        "bool_params",
+        "string_params",
+        "list_params",
+    ],
+)
+def test_dispatch_eval_returns_eval_failed_on_malformed_request(
+    monkeypatch: pytest.MonkeyPatch,
+    request_in: dict,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(request_in)
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "eval_failed"
+
+
+def test_safe_repr_returns_fallback_when_repr_raises() -> None:
+    class Broken:
+        def __repr__(self) -> str:
+            raise RuntimeError("nope")
+
+    result = _safe_repr(Broken())
+    assert "unrepresentable" in result
+    assert "Broken" in result
+    assert "RuntimeError" in result
+
+
+def test_session_globals_returns_main_module_dict() -> None:
+    assert _session_globals() is sys.modules["__main__"].__dict__
+
+
+@pytest.mark.parametrize(
+    "request_in",
+    [
+        {"id": "r1", "command": "nonexistent_command"},
         {"id": "r2"},
     ],
     ids=["unknown_command", "missing_command"],
@@ -154,6 +277,40 @@ def test_dispatch_loop_survives_handler_exception(
         ok_response = _read_frame(test_adapter)
         assert ok_response["id"] == "req-ok"
         assert ok_response["result"] == {"pong": True}
+    finally:
+        test_adapter.close()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+
+def test_dispatch_loop_survives_submitted_system_exit(
+    adapter_pair: _AdapterPair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper_adapter, test_adapter = adapter_pair
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    thread = threading.Thread(target=_dispatch_loop, args=(helper_adapter,))
+    thread.start()
+    try:
+        _write_frame(
+            test_adapter,
+            {
+                "id": "exit",
+                "command": "eval",
+                "params": {"code": "raise SystemExit('bye')"},
+            },
+        )
+        eval_response = _read_frame(test_adapter)
+        assert eval_response["id"] == "exit"
+        assert eval_response["status"] == "error"
+        assert eval_response["error"]["code"] == "eval_failed"
+        assert "SystemExit" in eval_response["error"]["message"]
+
+        _write_frame(test_adapter, {"id": "after-exit", "command": "ping"})
+        ping_response = _read_frame(test_adapter)
+        assert ping_response["id"] == "after-exit"
+        assert ping_response["result"] == {"pong": True}
     finally:
         test_adapter.close()
         thread.join(timeout=2.0)

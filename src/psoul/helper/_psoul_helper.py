@@ -7,6 +7,7 @@ length-prefixed JSON, then restores the user's argv and runpys
 the user target.
 """
 
+import ast
 import contextlib
 import json
 import os
@@ -93,6 +94,7 @@ class UnixHelperPipeAdapter:
 
 
 _CMD_CAPABILITIES = "capabilities"
+_CMD_EVAL = "eval"
 _CMD_PING = "ping"
 
 
@@ -114,12 +116,24 @@ def _write_frame(adapter: _PipeAdapter, message: dict) -> None:
     adapter.send(_FRAME_HEADER.pack(len(payload)) + payload)
 
 
+def _session_globals() -> dict:
+    """Return the read-path namespace shared by eval and vars-global."""
+    return sys.modules["__main__"].__dict__
+
+
+def _safe_repr(value: object) -> str:
+    """Return ``repr(value)`` or a fallback when ``__repr__`` raises."""
+    try:
+        return repr(value)
+    except BaseException as exc:  # noqa: BLE001 (one bad repr must not blow up a multi-value result)
+        return f"<unrepresentable {type(value).__name__}: {type(exc).__name__}>"
+
+
 def _dispatch(request: dict) -> dict:
     """Dispatch one request and return the response envelope.
 
-    Currently implemented handlers are ``capabilities`` and
-    ``ping``. Any other command returns a ``not_implemented`` error
-    response.
+    Recognized commands are ``capabilities``, ``eval``, and ``ping``.
+    Any other command returns a ``not_implemented`` error response.
     """
     request_id = request.get("id")
     command = request.get("command", "")
@@ -129,11 +143,56 @@ def _dispatch(request: dict) -> dict:
             "type": "response",
             "status": "ok",
             "result": {
-                "commands": [_CMD_CAPABILITIES, _CMD_PING],
+                "commands": [_CMD_CAPABILITIES, _CMD_EVAL, _CMD_PING],
                 "python_version": list(sys.version_info[:3]),
                 "backends": [],
             },
         }
+    if command == _CMD_EVAL:
+        params = request.get("params")
+        if not isinstance(params, dict) or "code" not in params:
+            return {
+                "id": request_id,
+                "type": "response",
+                "status": "error",
+                "error": {
+                    "code": "eval_failed",
+                    "message": "missing required param: code",
+                    "traceback": "",
+                },
+            }
+        try:
+            code = params["code"]
+            ns = _session_globals()
+            tree = ast.parse(code, mode="exec")
+            result = None
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                leading = ast.Module(body=tree.body[:-1], type_ignores=[])
+                trailing = ast.Expression(body=tree.body[-1].value)
+                exec(compile(leading, "<eval>", "exec"), ns)  # noqa: S102
+                result = eval(compile(trailing, "<eval>", "eval"), ns)  # noqa: S307
+            else:
+                exec(compile(tree, "<eval>", "exec"), ns)  # noqa: S102
+            return {
+                "id": request_id,
+                "type": "response",
+                "status": "ok",
+                "result": {
+                    "value": _safe_repr(result),
+                    "type": type(result).__name__,
+                },
+            }
+        except BaseException as exc:  # noqa: BLE001 (eval handler must answer with eval_failed for any user-code failure)
+            return {
+                "id": request_id,
+                "type": "response",
+                "status": "error",
+                "error": {
+                    "code": "eval_failed",
+                    "message": f"{type(exc).__name__}: {exc}",
+                    "traceback": "".join(traceback.format_exception(exc)),
+                },
+            }
     if command == _CMD_PING:
         return {
             "id": request_id,
