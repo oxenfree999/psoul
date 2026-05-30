@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -129,86 +130,105 @@ def _safe_repr(value: object) -> str:
         return f"<unrepresentable {type(value).__name__}: {type(exc).__name__}>"
 
 
-def _dispatch(request: dict) -> dict:
-    """Dispatch one request and return the response envelope.
+def _handle_capabilities(request: dict) -> dict:
+    """Return the helper's capabilities envelope."""
+    return {
+        "id": request.get("id"),
+        "type": "response",
+        "status": "ok",
+        "result": {
+            "commands": list(_HANDLERS.keys()),
+            "python_version": list(sys.version_info[:3]),
+            "backends": [],
+        },
+    }
 
-    Recognized commands are ``capabilities``, ``eval``, and ``ping``.
-    Any other command returns a ``not_implemented`` error response.
-    """
+
+def _handle_eval(request: dict) -> dict:
+    """Evaluate ``params.code`` and return value/type or ``eval_failed``."""
     request_id = request.get("id")
-    command = request.get("command", "")
-    if command == _CMD_CAPABILITIES:
+    params = request.get("params")
+    if not isinstance(params, dict) or "code" not in params:
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "eval_failed",
+                "message": "missing required param: code",
+                "traceback": "",
+            },
+        }
+    try:
+        code = params["code"]
+        ns = _session_globals()
+        tree = ast.parse(code, mode="exec")
+        result = None
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            leading = ast.Module(body=tree.body[:-1], type_ignores=[])
+            trailing = ast.Expression(body=tree.body[-1].value)
+            exec(compile(leading, "<eval>", "exec"), ns)  # noqa: S102
+            result = eval(compile(trailing, "<eval>", "eval"), ns)  # noqa: S307
+        else:
+            exec(compile(tree, "<eval>", "exec"), ns)  # noqa: S102
         return {
             "id": request_id,
             "type": "response",
             "status": "ok",
             "result": {
-                "commands": [_CMD_CAPABILITIES, _CMD_EVAL, _CMD_PING],
-                "python_version": list(sys.version_info[:3]),
-                "backends": [],
+                "value": _safe_repr(result),
+                "type": type(result).__name__,
             },
         }
-    if command == _CMD_EVAL:
-        params = request.get("params")
-        if not isinstance(params, dict) or "code" not in params:
-            return {
-                "id": request_id,
-                "type": "response",
-                "status": "error",
-                "error": {
-                    "code": "eval_failed",
-                    "message": "missing required param: code",
-                    "traceback": "",
-                },
-            }
-        try:
-            code = params["code"]
-            ns = _session_globals()
-            tree = ast.parse(code, mode="exec")
-            result = None
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                leading = ast.Module(body=tree.body[:-1], type_ignores=[])
-                trailing = ast.Expression(body=tree.body[-1].value)
-                exec(compile(leading, "<eval>", "exec"), ns)  # noqa: S102
-                result = eval(compile(trailing, "<eval>", "eval"), ns)  # noqa: S307
-            else:
-                exec(compile(tree, "<eval>", "exec"), ns)  # noqa: S102
-            return {
-                "id": request_id,
-                "type": "response",
-                "status": "ok",
-                "result": {
-                    "value": _safe_repr(result),
-                    "type": type(result).__name__,
-                },
-            }
-        except BaseException as exc:  # noqa: BLE001 (eval handler must answer with eval_failed for any user-code failure)
-            return {
-                "id": request_id,
-                "type": "response",
-                "status": "error",
-                "error": {
-                    "code": "eval_failed",
-                    "message": f"{type(exc).__name__}: {exc}",
-                    "traceback": "".join(traceback.format_exception(exc)),
-                },
-            }
-    if command == _CMD_PING:
+    except BaseException as exc:  # noqa: BLE001 (eval handler must answer with eval_failed for any user-code failure)
         return {
             "id": request_id,
             "type": "response",
-            "status": "ok",
-            "result": {"pong": True},
+            "status": "error",
+            "error": {
+                "code": "eval_failed",
+                "message": f"{type(exc).__name__}: {exc}",
+                "traceback": "".join(traceback.format_exception(exc)),
+            },
         }
+
+
+def _handle_ping(request: dict) -> dict:
+    """Return a ``pong`` response."""
     return {
-        "id": request_id,
+        "id": request.get("id"),
         "type": "response",
-        "status": "error",
-        "error": {
-            "code": "not_implemented",
-            "message": f"{command!r} is not implemented",
-        },
+        "status": "ok",
+        "result": {"pong": True},
     }
+
+
+_HANDLERS: dict[str, Callable[[dict], dict]] = {
+    _CMD_CAPABILITIES: _handle_capabilities,
+    _CMD_EVAL: _handle_eval,
+    _CMD_PING: _handle_ping,
+}
+
+
+def _dispatch(request: dict) -> dict:
+    """Dispatch one request to its handler or return ``not_implemented``.
+
+    Lookup goes through :data:`_HANDLERS`. Commands not in the table
+    return a ``not_implemented`` error response.
+    """
+    command = request.get("command", "")
+    handler = _HANDLERS.get(command)
+    if handler is None:
+        return {
+            "id": request.get("id"),
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "not_implemented",
+                "message": f"{command!r} is not implemented",
+            },
+        }
+    return handler(request)
 
 
 def _dispatch_loop(adapter: _PipeAdapter) -> None:
