@@ -8,7 +8,9 @@ the user target.
 """
 
 import ast
+import builtins
 import contextlib
+import inspect
 import json
 import os
 import runpy
@@ -96,6 +98,8 @@ class UnixHelperPipeAdapter:
 
 _CMD_CAPABILITIES = "capabilities"
 _CMD_EVAL = "eval"
+_CMD_INSPECT = "inspect"
+_CMD_INSPECT_OBJECT = "inspect_object"
 _CMD_PING = "ping"
 
 
@@ -193,6 +197,78 @@ def _handle_eval(request: dict) -> dict:
         }
 
 
+def _handle_inspect(request: dict) -> dict:
+    """Return user-defined globals, loaded modules, and Python sys_info."""
+    ns = _session_globals()
+    objects_list = [
+        {"name": name, "type": type(value).__name__}
+        for name, value in ns.items()
+        if not (name.startswith("__") and name.endswith("__")) and not inspect.ismodule(value)
+    ]
+    return {
+        "id": request.get("id"),
+        "type": "response",
+        "status": "ok",
+        "result": {
+            "modules": sorted(sys.modules.keys()),
+            "objects": objects_list,
+            "sys_info": {
+                "python_version": list(sys.version_info[:3]),
+                "platform": sys.platform,
+                "executable": sys.executable,
+            },
+        },
+    }
+
+
+def _handle_inspect_object(request: dict) -> dict:
+    """Resolve ``params.name`` in session globals then ``builtins``."""
+    request_id = request.get("id")
+    params = request.get("params")
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "inspect_failed",
+                "message": "missing required param: name",
+                "traceback": "",
+            },
+        }
+    name = params["name"]
+    ns = _session_globals()
+    if name in ns:
+        obj = ns[name]
+    elif hasattr(builtins, name):
+        obj = getattr(builtins, name)
+    else:
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "inspect_failed",
+                "message": f"name {name!r} not found",
+                "traceback": "",
+            },
+        }
+    result: dict = {
+        "type": type(obj).__name__,
+        "docstring": inspect.getdoc(obj),
+    }
+    with contextlib.suppress(TypeError, OSError):
+        result["source"] = inspect.getsource(obj)
+    with contextlib.suppress(TypeError, ValueError):
+        result["signature"] = str(inspect.signature(obj))
+    return {
+        "id": request_id,
+        "type": "response",
+        "status": "ok",
+        "result": result,
+    }
+
+
 def _handle_ping(request: dict) -> dict:
     """Return a ``pong`` response."""
     return {
@@ -206,6 +282,8 @@ def _handle_ping(request: dict) -> dict:
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     _CMD_CAPABILITIES: _handle_capabilities,
     _CMD_EVAL: _handle_eval,
+    _CMD_INSPECT: _handle_inspect,
+    _CMD_INSPECT_OBJECT: _handle_inspect_object,
     _CMD_PING: _handle_ping,
 }
 

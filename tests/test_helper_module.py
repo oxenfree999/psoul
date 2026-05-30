@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 import threading
+import types
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -46,6 +47,8 @@ def adapter_pair() -> Iterator[_AdapterPair]:
         ("capabilities", "ok"),
         ("ping", "ok"),
         ("eval", "error"),
+        ("inspect", "ok"),
+        ("inspect_object", "error"),
         ("debug.step", "error"),
         ("unknown_xyz", "error"),
     ],
@@ -59,7 +62,13 @@ def test_dispatch_status_and_id_echo(command: str, expected_status: str) -> None
 
 def test_dispatch_capabilities_result_shape() -> None:
     response = _dispatch({"id": "c", "command": "capabilities"})
-    assert response["result"]["commands"] == ["capabilities", "eval", "ping"]
+    assert response["result"]["commands"] == [
+        "capabilities",
+        "eval",
+        "inspect",
+        "inspect_object",
+        "ping",
+    ]
     assert response["result"]["backends"] == []
     assert len(response["result"]["python_version"]) == 3
 
@@ -188,6 +197,121 @@ def test_safe_repr_returns_fallback_when_repr_raises() -> None:
 
 def test_session_globals_returns_main_module_dict() -> None:
     assert _session_globals() is sys.modules["__main__"].__dict__
+
+
+def test_dispatch_inspect_excludes_dunders_and_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns = {
+        "my_var": 42,
+        "_private": "hidden",
+        "__dunder__": "skip",
+        "fake_mod": types.ModuleType("fake_mod"),
+    }
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch({"id": "i", "command": "inspect"})
+    assert response["status"] == "ok"
+    result = response["result"]
+    object_names = [obj["name"] for obj in result["objects"]]
+    assert "my_var" in object_names
+    assert "_private" in object_names
+    assert "__dunder__" not in object_names
+    assert "fake_mod" not in object_names
+    assert "sys" in result["modules"]
+    assert result["sys_info"]["platform"] == sys.platform
+    assert "python_version" in result["sys_info"]
+    assert "executable" in result["sys_info"]
+
+
+def test_dispatch_inspect_object_returns_function_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def my_func(x: int, y: int = 0) -> int:
+        """My docstring."""
+        return x + y
+
+    ns = {"my_func": my_func}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "io",
+            "command": "inspect_object",
+            "params": {"name": "my_func"},
+        }
+    )
+    assert response["status"] == "ok"
+    result = response["result"]
+    assert "name" not in result
+    assert result["type"] == "function"
+    assert result["docstring"] == "My docstring."
+    assert "def my_func" in result["source"]
+    assert "x: int" in result["signature"]
+
+
+def test_dispatch_inspect_object_resolves_builtin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "io",
+            "command": "inspect_object",
+            "params": {"name": "len"},
+        }
+    )
+    assert response["status"] == "ok"
+    result = response["result"]
+    assert result["type"] == "builtin_function_or_method"
+    assert result["docstring"] is not None
+    assert "source" not in result
+    assert "name" not in result
+
+
+def test_dispatch_inspect_object_returns_inspect_failed_on_unresolved_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "io",
+            "command": "inspect_object",
+            "params": {"name": "completely_nonexistent_xyz"},
+        }
+    )
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "inspect_failed"
+
+
+@pytest.mark.parametrize(
+    "request_in",
+    [
+        {"id": "io", "command": "inspect_object"},
+        {"id": "io", "command": "inspect_object", "params": {}},
+        {"id": "io", "command": "inspect_object", "params": None},
+        {"id": "io", "command": "inspect_object", "params": {"name": 123}},
+        {"id": "io", "command": "inspect_object", "params": 1},
+        {"id": "io", "command": "inspect_object", "params": [1, 2]},
+    ],
+    ids=[
+        "no_params",
+        "empty_params",
+        "null_params",
+        "non_string_name",
+        "int_params",
+        "list_params",
+    ],
+)
+def test_dispatch_inspect_object_returns_inspect_failed_on_malformed_request(
+    monkeypatch: pytest.MonkeyPatch,
+    request_in: dict,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(request_in)
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "inspect_failed"
 
 
 @pytest.mark.parametrize(
