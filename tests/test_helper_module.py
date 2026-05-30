@@ -112,6 +112,54 @@ def test_dispatch_loop_exits_on_eof(adapter_pair: _AdapterPair) -> None:
     assert not thread.is_alive()
 
 
+@pytest.mark.parametrize(
+    ("exc_type", "exc_message"),
+    [
+        (RuntimeError, "boom"),
+        (SystemExit, "bye"),
+    ],
+    ids=["exception_subclass", "base_exception_only"],
+)
+def test_dispatch_loop_survives_handler_exception(
+    adapter_pair: _AdapterPair,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_type: type[BaseException],
+    exc_message: str,
+) -> None:
+    helper_adapter, test_adapter = adapter_pair
+    original_dispatch = _dispatch
+    raised = False
+
+    def flaky_dispatch(request: dict) -> dict:
+        nonlocal raised
+        if not raised:
+            raised = True
+            raise exc_type(exc_message)
+        return original_dispatch(request)
+
+    monkeypatch.setattr(f"{_HELPER_MODULE}._dispatch", flaky_dispatch)
+    thread = threading.Thread(target=_dispatch_loop, args=(helper_adapter,))
+    thread.start()
+    try:
+        _write_frame(test_adapter, {"id": "req-err", "command": "ping"})
+        error_response = _read_frame(test_adapter)
+        assert error_response["id"] == "req-err"
+        assert error_response["status"] == "error"
+        assert error_response["error"]["code"] == "runtime_error"
+        assert exc_type.__name__ in error_response["error"]["message"]
+        assert exc_message in error_response["error"]["message"]
+        assert "Traceback" in error_response["error"]["traceback"]
+
+        _write_frame(test_adapter, {"id": "req-ok", "command": "ping"})
+        ok_response = _read_frame(test_adapter)
+        assert ok_response["id"] == "req-ok"
+        assert ok_response["result"] == {"pong": True}
+    finally:
+        test_adapter.close()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+
 def test_open_adapter_returns_none_without_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

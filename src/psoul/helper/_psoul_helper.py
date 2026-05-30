@@ -16,6 +16,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Protocol
 
@@ -155,7 +156,9 @@ def _dispatch_loop(adapter: _PipeAdapter) -> None:
     """Read requests, dispatch, write responses, until the peer closes.
 
     Closes ``adapter`` on exit. Helper-side EOF (supervisor closed
-    the pipe) is the normal termination path.
+    the pipe) is the normal termination path. A handler that raises is
+    caught here so the loop answers with an error response and keeps
+    serving, rather than letting the dispatch thread die silently.
     """
     try:
         while True:
@@ -163,7 +166,19 @@ def _dispatch_loop(adapter: _PipeAdapter) -> None:
                 request = _read_frame(adapter)
             except EOFError:
                 return
-            response = _dispatch(request)
+            try:
+                response = _dispatch(request)
+            except BaseException as exc:  # noqa: BLE001 (a handler must never kill the dispatch loop)
+                response = {
+                    "id": request.get("id"),
+                    "type": "response",
+                    "status": "error",
+                    "error": {
+                        "code": "runtime_error",
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "traceback": "".join(traceback.format_exception(exc)),
+                    },
+                }
             _write_frame(adapter, response)
     finally:
         adapter.close()
