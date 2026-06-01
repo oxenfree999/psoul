@@ -549,8 +549,11 @@ def test_run_record_status_helper_true_while_child_alive(tmp_path: Path) -> None
         helper_seen = False
         while time.monotonic() < deadline:
             if (tmp_path / "psoul.db").exists():
-                with closing(open_db(tmp_path, create=False)) as conn:
-                    sess = SessionStore(conn).get("live-helper")
+                try:
+                    with closing(open_db(tmp_path, create=False)) as conn:
+                        sess = SessionStore(conn).get("live-helper")
+                except FileNotFoundError:
+                    sess = None
                 if sess is not None and sess.helper_pid is not None:
                     helper_seen = True
                     break

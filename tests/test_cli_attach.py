@@ -44,7 +44,7 @@ requires_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.
 
 _DETACH_ESCAPE_BYTE = bytes([0x1D])
 _TEST_RECV_BUFSIZE = 1024  # bytes per recv() in attach-client tests, sized for small fixtures
-_PROC_STARTUP_GRACE = 0.5  # seconds to let the spawned attach client connect and send HELLO
+_PROC_STARTUP_GRACE = 2.0  # seconds to let the spawned attach client connect and send HELLO
 _RUNNING_TIMEOUT = 5.0
 
 

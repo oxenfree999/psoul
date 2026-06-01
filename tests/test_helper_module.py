@@ -5,6 +5,8 @@ import os
 import socket
 import sys
 import threading
+import time
+import types
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -20,6 +22,9 @@ from psoul.helper._psoul_helper import (
     _open_adapter,
     _read_frame,
     _run_user_target,
+    _safe_repr,
+    _session_globals,
+    _user_thread_frame,
     _write_frame,
 )
 
@@ -44,6 +49,10 @@ def adapter_pair() -> Iterator[_AdapterPair]:
         ("capabilities", "ok"),
         ("ping", "ok"),
         ("eval", "error"),
+        ("inspect", "ok"),
+        ("inspect_object", "error"),
+        ("stack", "ok"),
+        ("vars", "ok"),
         ("debug.step", "error"),
         ("unknown_xyz", "error"),
     ],
@@ -57,7 +66,15 @@ def test_dispatch_status_and_id_echo(command: str, expected_status: str) -> None
 
 def test_dispatch_capabilities_result_shape() -> None:
     response = _dispatch({"id": "c", "command": "capabilities"})
-    assert response["result"]["commands"] == ["capabilities", "ping"]
+    assert response["result"]["commands"] == [
+        "capabilities",
+        "eval",
+        "inspect",
+        "inspect_object",
+        "ping",
+        "stack",
+        "vars",
+    ]
     assert response["result"]["backends"] == []
     assert len(response["result"]["python_version"]) == 3
 
@@ -68,9 +85,416 @@ def test_dispatch_ping_result_is_pong() -> None:
 
 
 @pytest.mark.parametrize(
+    ("code", "expected_value", "expected_type"),
+    [
+        ("1 + 1", "2", "int"),
+        ("x = 5", "None", "NoneType"),
+        ("x = 5\nx + 3", "8", "int"),
+    ],
+    ids=["single_expression", "statement_only", "multi_statement"],
+)
+def test_dispatch_eval_returns_value_and_type(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    expected_value: str,
+    expected_type: str,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "e",
+            "command": "eval",
+            "params": {"code": code},
+        }
+    )
+    assert response["status"] == "ok"
+    assert response["result"] == {"value": expected_value, "type": expected_type}
+
+
+def test_dispatch_eval_mutates_session_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    _dispatch(
+        {
+            "id": "e",
+            "command": "eval",
+            "params": {"code": "x = 42"},
+        }
+    )
+    assert ns["x"] == 42
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_exc_name"),
+    [
+        ("undefined_name_xyz", "NameError"),
+        ("def foo(:", "SyntaxError"),
+        ("raise SystemExit('bye')", "SystemExit"),
+    ],
+    ids=["name_error", "syntax_error", "system_exit"],
+)
+def test_dispatch_eval_returns_eval_failed_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    expected_exc_name: str,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "e",
+            "command": "eval",
+            "params": {"code": code},
+        }
+    )
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "eval_failed"
+    assert expected_exc_name in response["error"]["message"]
+    assert "Traceback" in response["error"]["traceback"]
+
+
+@pytest.mark.parametrize(
     "request_in",
     [
-        {"id": "r1", "command": "eval"},
+        {"id": "e", "command": "eval"},
+        {"id": "e", "command": "eval", "params": {}},
+        {"id": "e", "command": "eval", "params": None},
+        {"id": "e", "command": "eval", "params": {"code": 123}},
+        {"id": "e", "command": "eval", "params": 1},
+        {"id": "e", "command": "eval", "params": True},
+        {"id": "e", "command": "eval", "params": "abcd"},
+        {"id": "e", "command": "eval", "params": [1, 2, 3]},
+    ],
+    ids=[
+        "no_params",
+        "empty_params",
+        "null_params",
+        "non_string_code",
+        "int_params",
+        "bool_params",
+        "string_params",
+        "list_params",
+    ],
+)
+def test_dispatch_eval_returns_eval_failed_on_malformed_request(
+    monkeypatch: pytest.MonkeyPatch,
+    request_in: dict,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(request_in)
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "eval_failed"
+
+
+def test_safe_repr_returns_fallback_when_repr_raises() -> None:
+    class Broken:
+        def __repr__(self) -> str:
+            raise RuntimeError("nope")
+
+    result = _safe_repr(Broken())
+    assert "unrepresentable" in result
+    assert "Broken" in result
+    assert "RuntimeError" in result
+
+
+def test_session_globals_returns_main_module_dict() -> None:
+    assert _session_globals() is sys.modules["__main__"].__dict__
+
+
+def test_dispatch_inspect_excludes_dunders_and_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns = {
+        "my_var": 42,
+        "_private": "hidden",
+        "__dunder__": "skip",
+        "fake_mod": types.ModuleType("fake_mod"),
+    }
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch({"id": "i", "command": "inspect"})
+    assert response["status"] == "ok"
+    result = response["result"]
+    object_names = [obj["name"] for obj in result["objects"]]
+    assert "my_var" in object_names
+    assert "_private" in object_names
+    assert "__dunder__" not in object_names
+    assert "fake_mod" not in object_names
+    assert "sys" in result["modules"]
+    assert result["sys_info"]["platform"] == sys.platform
+    assert "python_version" in result["sys_info"]
+    assert "executable" in result["sys_info"]
+
+
+def test_dispatch_inspect_object_returns_function_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def my_func(x: int, y: int = 0) -> int:
+        """My docstring."""
+        return x + y
+
+    ns = {"my_func": my_func}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "io",
+            "command": "inspect_object",
+            "params": {"name": "my_func"},
+        }
+    )
+    assert response["status"] == "ok"
+    result = response["result"]
+    assert "name" not in result
+    assert result["type"] == "function"
+    assert result["docstring"] == "My docstring."
+    assert "def my_func" in result["source"]
+    assert "x: int" in result["signature"]
+
+
+def test_dispatch_inspect_object_resolves_builtin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "io",
+            "command": "inspect_object",
+            "params": {"name": "len"},
+        }
+    )
+    assert response["status"] == "ok"
+    result = response["result"]
+    assert result["type"] == "builtin_function_or_method"
+    assert result["docstring"] is not None
+    assert "source" not in result
+    assert "name" not in result
+
+
+def test_dispatch_inspect_object_returns_inspect_failed_on_unresolved_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "io",
+            "command": "inspect_object",
+            "params": {"name": "completely_nonexistent_xyz"},
+        }
+    )
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "inspect_failed"
+
+
+@pytest.mark.parametrize(
+    "request_in",
+    [
+        {"id": "io", "command": "inspect_object"},
+        {"id": "io", "command": "inspect_object", "params": {}},
+        {"id": "io", "command": "inspect_object", "params": None},
+        {"id": "io", "command": "inspect_object", "params": {"name": 123}},
+        {"id": "io", "command": "inspect_object", "params": 1},
+        {"id": "io", "command": "inspect_object", "params": [1, 2]},
+    ],
+    ids=[
+        "no_params",
+        "empty_params",
+        "null_params",
+        "non_string_name",
+        "int_params",
+        "list_params",
+    ],
+)
+def test_dispatch_inspect_object_returns_inspect_failed_on_malformed_request(
+    monkeypatch: pytest.MonkeyPatch,
+    request_in: dict,
+) -> None:
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(request_in)
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "inspect_failed"
+
+
+def test_dispatch_stack_returns_frame_list() -> None:
+    response = _dispatch({"id": "s", "command": "stack"})
+    assert response["status"] == "ok"
+    frames = response["result"]["frames"]
+    assert isinstance(frames, list)
+    assert len(frames) > 0
+    for frame in frames:
+        assert isinstance(frame["file"], str)
+        assert isinstance(frame["line"], int)
+        assert isinstance(frame["function"], str)
+        assert isinstance(frame["locals"], dict)
+    function_names = [f["function"] for f in frames]
+    assert "test_dispatch_stack_returns_frame_list" in function_names
+
+
+def test_dispatch_vars_local_returns_variable_list() -> None:
+    response = _dispatch({"id": "v", "command": "vars"})
+    assert response["status"] == "ok"
+    variables = response["result"]["variables"]
+    assert isinstance(variables, list)
+    for var in variables:
+        assert isinstance(var["name"], str)
+        assert isinstance(var["type"], str)
+        assert isinstance(var["repr"], str)
+
+
+def test_dispatch_vars_global_returns_session_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns = {"my_global": 42, "another": "hi"}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "v",
+            "command": "vars",
+            "params": {"scope": "global"},
+        }
+    )
+    assert response["status"] == "ok"
+    variables = response["result"]["variables"]
+    var_names = [v["name"] for v in variables]
+    assert "my_global" in var_names
+    assert "another" in var_names
+    my_global_entry = next(v for v in variables if v["name"] == "my_global")
+    assert my_global_entry["type"] == "int"
+    assert my_global_entry["repr"] == "42"
+
+
+@pytest.mark.parametrize(
+    ("request_in", "expected_msg_substr"),
+    [
+        ({"id": "v", "command": "vars", "params": {"scope": "weird"}}, "weird"),
+        ({"id": "v", "command": "vars", "params": None}, "dict"),
+        ({"id": "v", "command": "vars", "params": False}, "dict"),
+        ({"id": "v", "command": "vars", "params": 0}, "dict"),
+        ({"id": "v", "command": "vars", "params": ""}, "dict"),
+        ({"id": "v", "command": "vars", "params": []}, "dict"),
+        ({"id": "v", "command": "vars", "params": 1}, "dict"),
+        ({"id": "v", "command": "vars", "params": "string"}, "dict"),
+        ({"id": "v", "command": "vars", "params": [1, 2]}, "dict"),
+    ],
+    ids=[
+        "unknown_scope",
+        "null_params",
+        "bool_false_params",
+        "int_zero_params",
+        "empty_string_params",
+        "empty_list_params",
+        "int_params",
+        "string_params",
+        "list_params",
+    ],
+)
+def test_dispatch_vars_returns_invalid_scope_on_bad_input(
+    request_in: dict,
+    expected_msg_substr: str,
+) -> None:
+    response = _dispatch(request_in)
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "invalid_scope"
+    assert expected_msg_substr in response["error"]["message"]
+
+
+def test_user_thread_frame_called_from_worker_returns_main_frame() -> None:
+    captured: list[list[str]] = []
+
+    def worker() -> None:
+        frame = _user_thread_frame()
+        names = []
+        while frame is not None:
+            names.append(frame.f_code.co_name)
+            frame = frame.f_back
+        captured.append(names)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    assert "test_user_thread_frame_called_from_worker_returns_main_frame" in captured[0]
+    assert "worker" not in captured[0]
+
+
+def test_dispatch_stack_called_from_worker_reads_main_thread() -> None:
+    response_box: list[dict] = []
+
+    def worker() -> None:
+        response = _dispatch({"id": "s", "command": "stack"})
+        response_box.append(response)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    response = response_box[0]
+    assert response["status"] == "ok"
+    function_names = [f["function"] for f in response["result"]["frames"]]
+    assert "test_dispatch_stack_called_from_worker_reads_main_thread" in function_names
+    assert "worker" not in function_names
+
+
+def test_dispatch_vars_local_called_from_worker_reads_main_thread() -> None:
+    response_box: list[dict] = []
+    lock = threading.Lock()
+    lock.acquire()
+
+    def worker() -> None:
+        # Observed-state sync: poll until main's innermost Python frame is
+        # marker_function and its line number has stayed constant across
+        # three consecutive polls (so main is parked, not still executing).
+        deadline = time.monotonic() + 2.0
+        prev_lineno = None
+        stable = 0
+        while time.monotonic() < deadline:
+            frame = _user_thread_frame()
+            if frame is not None and frame.f_code.co_name == "marker_function":
+                if frame.f_lineno == prev_lineno:
+                    stable += 1
+                    if stable >= 3:
+                        break
+                else:
+                    stable = 1
+                    prev_lineno = frame.f_lineno
+            else:
+                stable = 0
+                prev_lineno = None
+            time.sleep(0.005)
+        response = _dispatch(
+            {
+                "id": "v",
+                "command": "vars",
+                "params": {"scope": "local"},
+            }
+        )
+        response_box.append(response)
+        lock.release()
+
+    def marker_function() -> None:
+        marker_local = "marker_value"  # noqa: F841 (read across threads via f_locals snapshot)
+        thread = threading.Thread(target=worker)
+        thread.start()
+        lock.acquire()
+        thread.join()
+
+    marker_function()
+
+    response = response_box[0]
+    assert response["status"] == "ok"
+    var_names = [v["name"] for v in response["result"]["variables"]]
+    assert "marker_local" in var_names
+
+
+@pytest.mark.parametrize(
+    "request_in",
+    [
+        {"id": "r1", "command": "nonexistent_command"},
         {"id": "r2"},
     ],
     ids=["unknown_command", "missing_command"],
@@ -110,6 +534,88 @@ def test_dispatch_loop_exits_on_eof(adapter_pair: _AdapterPair) -> None:
     test_adapter.close()
     thread.join(timeout=2.0)
     assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "exc_message"),
+    [
+        (RuntimeError, "boom"),
+        (SystemExit, "bye"),
+    ],
+    ids=["exception_subclass", "base_exception_only"],
+)
+def test_dispatch_loop_survives_handler_exception(
+    adapter_pair: _AdapterPair,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_type: type[BaseException],
+    exc_message: str,
+) -> None:
+    helper_adapter, test_adapter = adapter_pair
+    original_dispatch = _dispatch
+    raised = False
+
+    def flaky_dispatch(request: dict) -> dict:
+        nonlocal raised
+        if not raised:
+            raised = True
+            raise exc_type(exc_message)
+        return original_dispatch(request)
+
+    monkeypatch.setattr(f"{_HELPER_MODULE}._dispatch", flaky_dispatch)
+    thread = threading.Thread(target=_dispatch_loop, args=(helper_adapter,))
+    thread.start()
+    try:
+        _write_frame(test_adapter, {"id": "req-err", "command": "ping"})
+        error_response = _read_frame(test_adapter)
+        assert error_response["id"] == "req-err"
+        assert error_response["status"] == "error"
+        assert error_response["error"]["code"] == "runtime_error"
+        assert exc_type.__name__ in error_response["error"]["message"]
+        assert exc_message in error_response["error"]["message"]
+        assert "Traceback" in error_response["error"]["traceback"]
+
+        _write_frame(test_adapter, {"id": "req-ok", "command": "ping"})
+        ok_response = _read_frame(test_adapter)
+        assert ok_response["id"] == "req-ok"
+        assert ok_response["result"] == {"pong": True}
+    finally:
+        test_adapter.close()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+
+def test_dispatch_loop_survives_submitted_system_exit(
+    adapter_pair: _AdapterPair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper_adapter, test_adapter = adapter_pair
+    ns: dict = {}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    thread = threading.Thread(target=_dispatch_loop, args=(helper_adapter,))
+    thread.start()
+    try:
+        _write_frame(
+            test_adapter,
+            {
+                "id": "exit",
+                "command": "eval",
+                "params": {"code": "raise SystemExit('bye')"},
+            },
+        )
+        eval_response = _read_frame(test_adapter)
+        assert eval_response["id"] == "exit"
+        assert eval_response["status"] == "error"
+        assert eval_response["error"]["code"] == "eval_failed"
+        assert "SystemExit" in eval_response["error"]["message"]
+
+        _write_frame(test_adapter, {"id": "after-exit", "command": "ping"})
+        ping_response = _read_frame(test_adapter)
+        assert ping_response["id"] == "after-exit"
+        assert ping_response["result"] == {"pong": True}
+    finally:
+        test_adapter.close()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
 
 
 def test_open_adapter_returns_none_without_env(

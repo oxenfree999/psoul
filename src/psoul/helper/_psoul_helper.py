@@ -7,7 +7,10 @@ length-prefixed JSON, then restores the user's argv and runpys
 the user target.
 """
 
+import ast
+import builtins
 import contextlib
+import inspect
 import json
 import os
 import runpy
@@ -16,6 +19,9 @@ import struct
 import sys
 import threading
 import time
+import traceback
+import types
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -92,7 +98,12 @@ class UnixHelperPipeAdapter:
 
 
 _CMD_CAPABILITIES = "capabilities"
+_CMD_EVAL = "eval"
+_CMD_INSPECT = "inspect"
+_CMD_INSPECT_OBJECT = "inspect_object"
 _CMD_PING = "ping"
+_CMD_STACK = "stack"
+_CMD_VARS = "vars"
 
 
 def _read_frame(adapter: _PipeAdapter) -> dict:
@@ -113,49 +124,279 @@ def _write_frame(adapter: _PipeAdapter, message: dict) -> None:
     adapter.send(_FRAME_HEADER.pack(len(payload)) + payload)
 
 
-def _dispatch(request: dict) -> dict:
-    """Dispatch one request and return the response envelope.
+def _session_globals() -> dict:
+    """Return the read-path namespace shared by eval and vars-global."""
+    return sys.modules["__main__"].__dict__
 
-    Currently implemented handlers are ``capabilities`` and
-    ``ping``. Any other command returns a ``not_implemented`` error
-    response.
+
+def _safe_repr(value: object) -> str:
+    """Return ``repr(value)`` or a fallback when ``__repr__`` raises."""
+    try:
+        return repr(value)
+    except BaseException as exc:  # noqa: BLE001 (one bad repr must not blow up a multi-value result)
+        return f"<unrepresentable {type(value).__name__}: {type(exc).__name__}>"
+
+
+def _user_thread_frame() -> types.FrameType | None:
+    """Return the user main thread's innermost Python frame, or None.
+
+    The dispatch loop runs on a daemon thread. ``stack`` and ``vars`` need
+    to read the user's main thread, not the dispatch thread. This helper
+    is the single point that selects across threads.
     """
+    ident = threading.main_thread().ident
+    if ident is None:
+        return None
+    return sys._current_frames().get(ident)  # noqa: SLF001 (documented stdlib API for cross-thread frame snapshots)
+
+
+def _handle_capabilities(request: dict) -> dict:
+    """Return the helper's capabilities envelope."""
+    return {
+        "id": request.get("id"),
+        "type": "response",
+        "status": "ok",
+        "result": {
+            "commands": list(_HANDLERS.keys()),
+            "python_version": list(sys.version_info[:3]),
+            "backends": [],
+        },
+    }
+
+
+def _handle_eval(request: dict) -> dict:
+    """Evaluate ``params.code`` and return value/type or ``eval_failed``."""
     request_id = request.get("id")
-    command = request.get("command", "")
-    if command == _CMD_CAPABILITIES:
+    params = request.get("params")
+    if not isinstance(params, dict) or "code" not in params:
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "eval_failed",
+                "message": "missing required param: code",
+                "traceback": "",
+            },
+        }
+    try:
+        code = params["code"]
+        ns = _session_globals()
+        tree = ast.parse(code, mode="exec")
+        result = None
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            leading = ast.Module(body=tree.body[:-1], type_ignores=[])
+            trailing = ast.Expression(body=tree.body[-1].value)
+            exec(compile(leading, "<eval>", "exec"), ns)  # noqa: S102
+            result = eval(compile(trailing, "<eval>", "eval"), ns)  # noqa: S307
+        else:
+            exec(compile(tree, "<eval>", "exec"), ns)  # noqa: S102
         return {
             "id": request_id,
             "type": "response",
             "status": "ok",
             "result": {
-                "commands": [_CMD_CAPABILITIES, _CMD_PING],
-                "python_version": list(sys.version_info[:3]),
-                "backends": [],
+                "value": _safe_repr(result),
+                "type": type(result).__name__,
             },
         }
-    if command == _CMD_PING:
+    except BaseException as exc:  # noqa: BLE001 (eval handler must answer with eval_failed for any user-code failure)
         return {
             "id": request_id,
             "type": "response",
-            "status": "ok",
-            "result": {"pong": True},
+            "status": "error",
+            "error": {
+                "code": "eval_failed",
+                "message": f"{type(exc).__name__}: {exc}",
+                "traceback": "".join(traceback.format_exception(exc)),
+            },
         }
+
+
+def _handle_inspect(request: dict) -> dict:
+    """Return user-defined globals, loaded modules, and Python sys_info."""
+    ns = _session_globals()
+    objects_list = [
+        {"name": name, "type": type(value).__name__}
+        for name, value in ns.items()
+        if not (name.startswith("__") and name.endswith("__")) and not inspect.ismodule(value)
+    ]
+    return {
+        "id": request.get("id"),
+        "type": "response",
+        "status": "ok",
+        "result": {
+            "modules": sorted(sys.modules.keys()),
+            "objects": objects_list,
+            "sys_info": {
+                "python_version": list(sys.version_info[:3]),
+                "platform": sys.platform,
+                "executable": sys.executable,
+            },
+        },
+    }
+
+
+def _handle_inspect_object(request: dict) -> dict:
+    """Resolve ``params.name`` in session globals then ``builtins``."""
+    request_id = request.get("id")
+    params = request.get("params")
+    if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "inspect_failed",
+                "message": "missing required param: name",
+                "traceback": "",
+            },
+        }
+    name = params["name"]
+    ns = _session_globals()
+    if name in ns:
+        obj = ns[name]
+    elif hasattr(builtins, name):
+        obj = getattr(builtins, name)
+    else:
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "inspect_failed",
+                "message": f"name {name!r} not found",
+                "traceback": "",
+            },
+        }
+    result: dict = {
+        "type": type(obj).__name__,
+        "docstring": inspect.getdoc(obj),
+    }
+    with contextlib.suppress(TypeError, OSError):
+        result["source"] = inspect.getsource(obj)
+    with contextlib.suppress(TypeError, ValueError):
+        result["signature"] = str(inspect.signature(obj))
     return {
         "id": request_id,
         "type": "response",
-        "status": "error",
-        "error": {
-            "code": "not_implemented",
-            "message": f"{command!r} is not implemented",
-        },
+        "status": "ok",
+        "result": result,
     }
+
+
+def _handle_ping(request: dict) -> dict:
+    """Return a ``pong`` response."""
+    return {
+        "id": request.get("id"),
+        "type": "response",
+        "status": "ok",
+        "result": {"pong": True},
+    }
+
+
+def _handle_stack(request: dict) -> dict:
+    """Return the user main thread's Python stack, innermost first."""
+    frame = _user_thread_frame()
+    frames = []
+    while frame is not None:
+        frames.append(
+            {
+                "file": frame.f_code.co_filename,
+                "line": frame.f_lineno,
+                "function": frame.f_code.co_name,
+                "locals": {name: _safe_repr(value) for name, value in frame.f_locals.items()},
+            }
+        )
+        frame = frame.f_back
+    return {
+        "id": request.get("id"),
+        "type": "response",
+        "status": "ok",
+        "result": {"frames": frames},
+    }
+
+
+def _handle_vars(request: dict) -> dict:
+    """Return variables from the requested scope (default ``local``)."""
+    request_id = request.get("id")
+    params = request.get("params", {})
+    if not isinstance(params, dict):
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "invalid_scope",
+                "message": "params must be a dict",
+                "traceback": "",
+            },
+        }
+    scope = params.get("scope", "local")
+    if scope == "local":
+        frame = _user_thread_frame()
+        ns = frame.f_locals if frame is not None else {}
+    elif scope == "global":
+        ns = _session_globals()
+    else:
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "invalid_scope",
+                "message": f"unknown scope {scope!r}",
+                "traceback": "",
+            },
+        }
+    variables = [{"name": name, "type": type(value).__name__, "repr": _safe_repr(value)} for name, value in ns.items()]
+    return {
+        "id": request_id,
+        "type": "response",
+        "status": "ok",
+        "result": {"variables": variables},
+    }
+
+
+_HANDLERS: dict[str, Callable[[dict], dict]] = {
+    _CMD_CAPABILITIES: _handle_capabilities,
+    _CMD_EVAL: _handle_eval,
+    _CMD_INSPECT: _handle_inspect,
+    _CMD_INSPECT_OBJECT: _handle_inspect_object,
+    _CMD_PING: _handle_ping,
+    _CMD_STACK: _handle_stack,
+    _CMD_VARS: _handle_vars,
+}
+
+
+def _dispatch(request: dict) -> dict:
+    """Dispatch one request to its handler or return ``not_implemented``.
+
+    Lookup goes through :data:`_HANDLERS`. Commands not in the table
+    return a ``not_implemented`` error response.
+    """
+    command = request.get("command", "")
+    handler = _HANDLERS.get(command)
+    if handler is None:
+        return {
+            "id": request.get("id"),
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "not_implemented",
+                "message": f"{command!r} is not implemented",
+            },
+        }
+    return handler(request)
 
 
 def _dispatch_loop(adapter: _PipeAdapter) -> None:
     """Read requests, dispatch, write responses, until the peer closes.
 
     Closes ``adapter`` on exit. Helper-side EOF (supervisor closed
-    the pipe) is the normal termination path.
+    the pipe) is the normal termination path. A handler that raises is
+    caught here so the loop answers with an error response and keeps
+    serving, rather than letting the dispatch thread die silently.
     """
     try:
         while True:
@@ -163,7 +404,19 @@ def _dispatch_loop(adapter: _PipeAdapter) -> None:
                 request = _read_frame(adapter)
             except EOFError:
                 return
-            response = _dispatch(request)
+            try:
+                response = _dispatch(request)
+            except BaseException as exc:  # noqa: BLE001 (a handler must never kill the dispatch loop)
+                response = {
+                    "id": request.get("id"),
+                    "type": "response",
+                    "status": "error",
+                    "error": {
+                        "code": "runtime_error",
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "traceback": "".join(traceback.format_exception(exc)),
+                    },
+                }
             _write_frame(adapter, response)
     finally:
         adapter.close()
