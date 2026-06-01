@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import types
 from collections.abc import Iterator
 from pathlib import Path
@@ -23,6 +24,7 @@ from psoul.helper._psoul_helper import (
     _run_user_target,
     _safe_repr,
     _session_globals,
+    _user_thread_frame,
     _write_frame,
 )
 
@@ -49,6 +51,8 @@ def adapter_pair() -> Iterator[_AdapterPair]:
         ("eval", "error"),
         ("inspect", "ok"),
         ("inspect_object", "error"),
+        ("stack", "ok"),
+        ("vars", "ok"),
         ("debug.step", "error"),
         ("unknown_xyz", "error"),
     ],
@@ -68,6 +72,8 @@ def test_dispatch_capabilities_result_shape() -> None:
         "inspect",
         "inspect_object",
         "ping",
+        "stack",
+        "vars",
     ]
     assert response["result"]["backends"] == []
     assert len(response["result"]["python_version"]) == 3
@@ -312,6 +318,177 @@ def test_dispatch_inspect_object_returns_inspect_failed_on_malformed_request(
     response = _dispatch(request_in)
     assert response["status"] == "error"
     assert response["error"]["code"] == "inspect_failed"
+
+
+def test_dispatch_stack_returns_frame_list() -> None:
+    response = _dispatch({"id": "s", "command": "stack"})
+    assert response["status"] == "ok"
+    frames = response["result"]["frames"]
+    assert isinstance(frames, list)
+    assert len(frames) > 0
+    for frame in frames:
+        assert isinstance(frame["file"], str)
+        assert isinstance(frame["line"], int)
+        assert isinstance(frame["function"], str)
+        assert isinstance(frame["locals"], dict)
+    function_names = [f["function"] for f in frames]
+    assert "test_dispatch_stack_returns_frame_list" in function_names
+
+
+def test_dispatch_vars_local_returns_variable_list() -> None:
+    response = _dispatch({"id": "v", "command": "vars"})
+    assert response["status"] == "ok"
+    variables = response["result"]["variables"]
+    assert isinstance(variables, list)
+    for var in variables:
+        assert isinstance(var["name"], str)
+        assert isinstance(var["type"], str)
+        assert isinstance(var["repr"], str)
+
+
+def test_dispatch_vars_global_returns_session_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ns = {"my_global": 42, "another": "hi"}
+    monkeypatch.setattr(f"{_HELPER_MODULE}._session_globals", lambda: ns)
+    response = _dispatch(
+        {
+            "id": "v",
+            "command": "vars",
+            "params": {"scope": "global"},
+        }
+    )
+    assert response["status"] == "ok"
+    variables = response["result"]["variables"]
+    var_names = [v["name"] for v in variables]
+    assert "my_global" in var_names
+    assert "another" in var_names
+    my_global_entry = next(v for v in variables if v["name"] == "my_global")
+    assert my_global_entry["type"] == "int"
+    assert my_global_entry["repr"] == "42"
+
+
+@pytest.mark.parametrize(
+    ("request_in", "expected_msg_substr"),
+    [
+        ({"id": "v", "command": "vars", "params": {"scope": "weird"}}, "weird"),
+        ({"id": "v", "command": "vars", "params": None}, "dict"),
+        ({"id": "v", "command": "vars", "params": False}, "dict"),
+        ({"id": "v", "command": "vars", "params": 0}, "dict"),
+        ({"id": "v", "command": "vars", "params": ""}, "dict"),
+        ({"id": "v", "command": "vars", "params": []}, "dict"),
+        ({"id": "v", "command": "vars", "params": 1}, "dict"),
+        ({"id": "v", "command": "vars", "params": "string"}, "dict"),
+        ({"id": "v", "command": "vars", "params": [1, 2]}, "dict"),
+    ],
+    ids=[
+        "unknown_scope",
+        "null_params",
+        "bool_false_params",
+        "int_zero_params",
+        "empty_string_params",
+        "empty_list_params",
+        "int_params",
+        "string_params",
+        "list_params",
+    ],
+)
+def test_dispatch_vars_returns_invalid_scope_on_bad_input(
+    request_in: dict,
+    expected_msg_substr: str,
+) -> None:
+    response = _dispatch(request_in)
+    assert response["status"] == "error"
+    assert response["error"]["code"] == "invalid_scope"
+    assert expected_msg_substr in response["error"]["message"]
+
+
+def test_user_thread_frame_called_from_worker_returns_main_frame() -> None:
+    captured: list[list[str]] = []
+
+    def worker() -> None:
+        frame = _user_thread_frame()
+        names = []
+        while frame is not None:
+            names.append(frame.f_code.co_name)
+            frame = frame.f_back
+        captured.append(names)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    assert "test_user_thread_frame_called_from_worker_returns_main_frame" in captured[0]
+    assert "worker" not in captured[0]
+
+
+def test_dispatch_stack_called_from_worker_reads_main_thread() -> None:
+    response_box: list[dict] = []
+
+    def worker() -> None:
+        response = _dispatch({"id": "s", "command": "stack"})
+        response_box.append(response)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    response = response_box[0]
+    assert response["status"] == "ok"
+    function_names = [f["function"] for f in response["result"]["frames"]]
+    assert "test_dispatch_stack_called_from_worker_reads_main_thread" in function_names
+    assert "worker" not in function_names
+
+
+def test_dispatch_vars_local_called_from_worker_reads_main_thread() -> None:
+    response_box: list[dict] = []
+    lock = threading.Lock()
+    lock.acquire()
+
+    def worker() -> None:
+        # Observed-state sync: poll until main's innermost Python frame is
+        # marker_function and its line number has stayed constant across
+        # three consecutive polls (so main is parked, not still executing).
+        deadline = time.monotonic() + 2.0
+        prev_lineno = None
+        stable = 0
+        while time.monotonic() < deadline:
+            frame = _user_thread_frame()
+            if frame is not None and frame.f_code.co_name == "marker_function":
+                if frame.f_lineno == prev_lineno:
+                    stable += 1
+                    if stable >= 3:
+                        break
+                else:
+                    stable = 1
+                    prev_lineno = frame.f_lineno
+            else:
+                stable = 0
+                prev_lineno = None
+            time.sleep(0.005)
+        response = _dispatch(
+            {
+                "id": "v",
+                "command": "vars",
+                "params": {"scope": "local"},
+            }
+        )
+        response_box.append(response)
+        lock.release()
+
+    def marker_function() -> None:
+        marker_local = "marker_value"  # noqa: F841 (read across threads via f_locals snapshot)
+        thread = threading.Thread(target=worker)
+        thread.start()
+        lock.acquire()
+        thread.join()
+
+    marker_function()
+
+    response = response_box[0]
+    assert response["status"] == "ok"
+    var_names = [v["name"] for v in response["result"]["variables"]]
+    assert "marker_local" in var_names
 
 
 @pytest.mark.parametrize(

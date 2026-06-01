@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import traceback
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -101,6 +102,8 @@ _CMD_EVAL = "eval"
 _CMD_INSPECT = "inspect"
 _CMD_INSPECT_OBJECT = "inspect_object"
 _CMD_PING = "ping"
+_CMD_STACK = "stack"
+_CMD_VARS = "vars"
 
 
 def _read_frame(adapter: _PipeAdapter) -> dict:
@@ -132,6 +135,19 @@ def _safe_repr(value: object) -> str:
         return repr(value)
     except BaseException as exc:  # noqa: BLE001 (one bad repr must not blow up a multi-value result)
         return f"<unrepresentable {type(value).__name__}: {type(exc).__name__}>"
+
+
+def _user_thread_frame() -> types.FrameType | None:
+    """Return the user main thread's innermost Python frame, or None.
+
+    The dispatch loop runs on a daemon thread. ``stack`` and ``vars`` need
+    to read the user's main thread, not the dispatch thread. This helper
+    is the single point that selects across threads.
+    """
+    ident = threading.main_thread().ident
+    if ident is None:
+        return None
+    return sys._current_frames().get(ident)  # noqa: SLF001 (documented stdlib API for cross-thread frame snapshots)
 
 
 def _handle_capabilities(request: dict) -> dict:
@@ -279,12 +295,77 @@ def _handle_ping(request: dict) -> dict:
     }
 
 
+def _handle_stack(request: dict) -> dict:
+    """Return the user main thread's Python stack, innermost first."""
+    frame = _user_thread_frame()
+    frames = []
+    while frame is not None:
+        frames.append(
+            {
+                "file": frame.f_code.co_filename,
+                "line": frame.f_lineno,
+                "function": frame.f_code.co_name,
+                "locals": {name: _safe_repr(value) for name, value in frame.f_locals.items()},
+            }
+        )
+        frame = frame.f_back
+    return {
+        "id": request.get("id"),
+        "type": "response",
+        "status": "ok",
+        "result": {"frames": frames},
+    }
+
+
+def _handle_vars(request: dict) -> dict:
+    """Return variables from the requested scope (default ``local``)."""
+    request_id = request.get("id")
+    params = request.get("params", {})
+    if not isinstance(params, dict):
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "invalid_scope",
+                "message": "params must be a dict",
+                "traceback": "",
+            },
+        }
+    scope = params.get("scope", "local")
+    if scope == "local":
+        frame = _user_thread_frame()
+        ns = frame.f_locals if frame is not None else {}
+    elif scope == "global":
+        ns = _session_globals()
+    else:
+        return {
+            "id": request_id,
+            "type": "response",
+            "status": "error",
+            "error": {
+                "code": "invalid_scope",
+                "message": f"unknown scope {scope!r}",
+                "traceback": "",
+            },
+        }
+    variables = [{"name": name, "type": type(value).__name__, "repr": _safe_repr(value)} for name, value in ns.items()]
+    return {
+        "id": request_id,
+        "type": "response",
+        "status": "ok",
+        "result": {"variables": variables},
+    }
+
+
 _HANDLERS: dict[str, Callable[[dict], dict]] = {
     _CMD_CAPABILITIES: _handle_capabilities,
     _CMD_EVAL: _handle_eval,
     _CMD_INSPECT: _handle_inspect,
     _CMD_INSPECT_OBJECT: _handle_inspect_object,
     _CMD_PING: _handle_ping,
+    _CMD_STACK: _handle_stack,
+    _CMD_VARS: _handle_vars,
 }
 
 
